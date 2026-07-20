@@ -192,8 +192,13 @@ owned discovery (runtime probes only annotate configured IDs). It has no auth, m
 telemetry, billing, model management, auto-routing, fallback, model pull/download, agents, UI,
 deployment, or direct Athena/Icarus integration.
 
-This slice adds live-but-honest Ollama readiness/discovery reconciliation via `/api/tags`.
-A shared SDK should wait until at least two consumers exist.
+Readiness probes Ollama via `/api/tags` and reuses one result for
+`READINESS_PROBE_TTL_SECONDS` (5s) across health, models, and chat preflight.
+Chat fails loud with `model_unavailable` when a successful live list has already
+proven the configured runtime name is absent — without calling `/api/chat`.
+When the probe is unchecked/unavailable, chat still reaches the provider and
+fails at that boundary rather than inventing a success. A shared SDK should wait
+until at least two consumers exist.
 
 ## License
 

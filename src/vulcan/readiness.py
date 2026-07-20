@@ -3,6 +3,10 @@
 The registry remains the only source of model *identity*. Live runtime probes
 only annotate whether a configured runtime_name is present. Vulcan never invents
 public IDs from the runtime list and never claims "available" when a probe fails.
+
+Probe results may be reused for a short, explicit TTL (see
+``READINESS_PROBE_TTL_SECONDS``) so health/models/chat share one inventory
+without unbounded stale "available" memory.
 """
 
 from __future__ import annotations
@@ -13,6 +17,10 @@ from typing import Literal
 from vulcan.registry import ConfiguredModel
 
 Availability = Literal["available", "unavailable", "unchecked"]
+
+# Short explicit bound for reusing one readiness probe across health/models/chat.
+# After this many seconds a new provider probe runs. No longer-lived cache.
+READINESS_PROBE_TTL_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)

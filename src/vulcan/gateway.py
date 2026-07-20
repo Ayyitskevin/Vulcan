@@ -5,12 +5,17 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from uuid import uuid4
 
 from vulcan.config import Capability
-from vulcan.errors import UnsupportedCapabilityError, VulcanError
+from vulcan.errors import ModelUnavailableError, UnsupportedCapabilityError, VulcanError
 from vulcan.providers.base import Provider, ProviderChatRequest, ProviderMessage
-from vulcan.readiness import DiscoveryReadiness, reconcile_configured_models
+from vulcan.readiness import (
+    READINESS_PROBE_TTL_SECONDS,
+    DiscoveryReadiness,
+    reconcile_configured_models,
+)
 from vulcan.registry import ModelRegistry
 from vulcan.schemas import (
     AssistantMessage,
@@ -27,6 +32,12 @@ def _new_completion_id() -> str:
     return f"chatcmpl-{uuid4().hex}"
 
 
+@dataclass(frozen=True, slots=True)
+class _CachedReadiness:
+    report: DiscoveryReadiness
+    expires_at: float
+
+
 class Gateway:
     def __init__(
         self,
@@ -35,17 +46,50 @@ class Gateway:
         *,
         clock: Callable[[], float] = time.time,
         id_factory: Callable[[], str] = _new_completion_id,
+        readiness_ttl_seconds: float = READINESS_PROBE_TTL_SECONDS,
     ) -> None:
+        if readiness_ttl_seconds < 0:
+            raise ValueError("readiness_ttl_seconds must be non-negative")
         self.registry = registry
         self.provider = provider
         self._clock = clock
         self._id_factory = id_factory
+        self._readiness_ttl_seconds = readiness_ttl_seconds
+        self._cached_readiness: _CachedReadiness | None = None
 
-    async def readiness(self) -> DiscoveryReadiness:
-        """Probe the selected provider and reconcile configured public models only."""
+    async def readiness(self, *, force: bool = False) -> DiscoveryReadiness:
+        """Probe (or reuse) provider readiness and reconcile configured models only.
+
+        Within ``readiness_ttl_seconds`` of a successful capture, returns the
+        same report without re-probing. ``force=True`` always runs a new probe.
+        Deterministic providers perform no network I/O either way.
+        """
+
+        now = self._clock()
+        if (
+            not force
+            and self._cached_readiness is not None
+            and now < self._cached_readiness.expires_at
+        ):
+            return self._cached_readiness.report
 
         probe = await self.provider.discover_runtime()
-        return reconcile_configured_models(self.registry.list(), probe)
+        report = reconcile_configured_models(self.registry.list(), probe)
+        self._cached_readiness = _CachedReadiness(
+            report=report,
+            expires_at=now + self._readiness_ttl_seconds,
+        )
+        return report
+
+    def _known_unavailable(self, report: DiscoveryReadiness, model_id: str) -> bool:
+        """True only after a successful live inventory proved the runtime name absent."""
+
+        if not report.live:
+            return False
+        for item in report.models:
+            if item.model_id == model_id and item.availability == "unavailable":
+                return True
+        return False
 
     async def chat(
         self,
@@ -66,6 +110,11 @@ class Gateway:
             if request.stream:
                 raise UnsupportedCapabilityError("streaming", request.model)
             model = self.registry.require_capability(request.model, Capability.CHAT)
+            # Preflight only short-circuits when a live list proved absence.
+            # Unchecked/provider-down falls through so the adapter fails loud.
+            readiness = await self.readiness()
+            if self._known_unavailable(readiness, model.id):
+                raise ModelUnavailableError(model.id)
             provider_request = ProviderChatRequest(
                 runtime_model=model.runtime_name,
                 messages=tuple(
