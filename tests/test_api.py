@@ -59,6 +59,7 @@ class RecordingProvider:
         self.result = result or ProviderChatResult(content=REPLY_SENTINEL, finish_reason="stop")
         self.failure = failure
         self.calls: list[ProviderChatRequest] = []
+        self.discover_calls = 0
         self.closed = False
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
@@ -66,6 +67,12 @@ class RecordingProvider:
         if self.failure is not None:
             raise self.failure
         return self.result
+
+    async def discover_runtime(self):
+        from vulcan.readiness import RuntimeProbe
+
+        self.discover_calls += 1
+        return RuntimeProbe(live=False, provider_availability="available", runtime_names=None)
 
     async def aclose(self) -> None:
         self.closed = True
