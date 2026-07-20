@@ -269,10 +269,11 @@ def create_app(
         response_model=HealthResponse,
         responses={400: {"model": ErrorEnvelope}},
     )
-    async def healthz() -> HealthResponse:
+    async def healthz(refresh: bool = False) -> HealthResponse:
         # Gateway liveness is always ok if this handler runs. Provider readiness
         # is a separate probe and never overrides the process-up signal.
-        readiness = await gateway.readiness()
+        # refresh=true forces a new probe (bypasses the short TTL reuse bound).
+        readiness = await gateway.readiness(force=refresh)
         return HealthResponse(
             provider=ProviderHealth(
                 kind=selected_provider.kind,
@@ -282,8 +283,9 @@ def create_app(
         )
 
     @app.get("/v1/models", response_model=ModelListResponse, responses=ERROR_RESPONSES)
-    async def list_models() -> ModelListResponse:
-        readiness = await gateway.readiness()
+    async def list_models(refresh: bool = False) -> ModelListResponse:
+        # refresh=true forces a new probe (bypasses the short TTL reuse bound).
+        readiness = await gateway.readiness(force=refresh)
         by_id = {item.model_id: item.availability for item in readiness.models}
         return ModelListResponse(
             discovery=DiscoveryMetadata(

@@ -51,6 +51,32 @@ class DiscoveryReadiness:
     models: tuple[ModelReadiness, ...]
 
 
+def runtime_name_matches(configured_runtime: str, live_names: frozenset[str]) -> bool:
+    """Whether a configured provider runtime name is present in a live inventory.
+
+    Matching rule (conservative — never invents public IDs):
+    1. Exact equality with a live name, or
+    2. The configured name has no ``:`` tag and exactly one live name is that
+       base with a single ``:tag`` suffix (e.g. config ``llama3`` matches only
+       ``llama3:latest`` when no other ``llama3:*`` is listed).
+
+    Multi-tag collisions (``llama3:latest`` and ``llama3:8b`` both present while
+    config says ``llama3``) are **not** treated as available.
+    """
+
+    name = configured_runtime.strip()
+    if not name:
+        return False
+    if name in live_names:
+        return True
+    if ":" in name:
+        return False
+    tagged = sorted(
+        live for live in live_names if live.startswith(f"{name}:") and live.count(":") == 1
+    )
+    return len(tagged) == 1
+
+
 def reconcile_configured_models(
     configured: tuple[ConfiguredModel, ...],
     probe: RuntimeProbe,
@@ -59,8 +85,8 @@ def reconcile_configured_models(
 
     Rules:
     - Configured public IDs are the only models returned.
-    - Successful live list → each model is available iff its runtime_name is
-      present in the runtime set; discovery.live is True.
+    - Successful live list → each model is available iff ``runtime_name_matches``
+      its runtime_name against the live set; discovery.live is True.
     - Failed / incomplete probe → models stay unchecked (never fake available).
     - A non-live provider that is still known ready (deterministic) may mark
       models available without claiming a live runtime inventory.
@@ -71,7 +97,11 @@ def reconcile_configured_models(
         models = tuple(
             ModelReadiness(
                 model_id=model.id,
-                availability="available" if model.runtime_name in names else "unavailable",
+                availability=(
+                    "available"
+                    if runtime_name_matches(model.runtime_name, names)
+                    else "unavailable"
+                ),
             )
             for model in configured
         )

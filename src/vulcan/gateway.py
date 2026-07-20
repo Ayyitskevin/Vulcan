@@ -81,6 +81,11 @@ class Gateway:
         )
         return report
 
+    def invalidate_readiness(self) -> None:
+        """Drop cached readiness so the next call re-probes the provider."""
+
+        self._cached_readiness = None
+
     def _known_unavailable(self, report: DiscoveryReadiness, model_id: str) -> bool:
         """True only after a successful live inventory proved the runtime name absent."""
 
@@ -125,6 +130,14 @@ class Gateway:
                 max_tokens=request.max_tokens,
             )
             result = await self.provider.chat(provider_request)
+        except ModelUnavailableError:
+            # Provider (or preflight) proved the model unavailable — drop any
+            # stale "available" inventory so the next health/models re-probes.
+            self.invalidate_readiness()
+            logger.warning(
+                "chat_failed", extra={"metadata": {**metadata, "error_code": "model_unavailable"}}
+            )
+            raise
         except VulcanError as exc:
             logger.warning("chat_failed", extra={"metadata": {**metadata, "error_code": exc.code}})
             raise

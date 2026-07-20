@@ -30,6 +30,7 @@ from vulcan.readiness import (
     READINESS_PROBE_TTL_SECONDS,
     RuntimeProbe,
     reconcile_configured_models,
+    runtime_name_matches,
 )
 from vulcan.registry import ConfiguredModel, ModelRegistry
 from vulcan.schemas import ChatCompletionRequest, ChatMessage, MessageRole
@@ -66,6 +67,46 @@ def test_reconcile_marks_present_and_missing_runtime_names() -> None:
     assert by_id == {"public-a": "available", "public-b": "unavailable"}
     # Never invents IDs from the runtime-only name "other"
     assert "other" not in by_id
+
+
+def test_runtime_name_matches_exact_and_unambiguous_tagged_only() -> None:
+    live = frozenset({"llama3:latest", "mistral:7b", "exact-name"})
+    assert runtime_name_matches("exact-name", live) is True
+    assert runtime_name_matches("llama3:latest", live) is True
+    # Untagged config matches the single tagged form
+    assert runtime_name_matches("llama3", live) is True
+    assert runtime_name_matches("mistral", live) is True
+    assert runtime_name_matches("missing", live) is False
+    assert runtime_name_matches("", live) is False
+    # Multi-tag collision must not claim available
+    collision = frozenset({"llama3:latest", "llama3:8b"})
+    assert runtime_name_matches("llama3", collision) is False
+    # Tagged config never uses the untagged expansion rule
+    assert runtime_name_matches("llama3:8b", frozenset({"llama3:latest"})) is False
+
+
+def test_reconcile_uses_tagged_match_without_inventing_ids() -> None:
+    report = reconcile_configured_models(
+        _configured(("public-short", "llama3"), ("public-exact", "mistral:7b")),
+        RuntimeProbe(
+            live=True,
+            provider_availability="available",
+            runtime_names=frozenset({"llama3:latest", "mistral:7b", "only-live"}),
+        ),
+    )
+    by_id = {item.model_id: item.availability for item in report.models}
+    assert by_id == {"public-short": "available", "public-exact": "available"}
+    assert "only-live" not in by_id
+
+    ambiguous = reconcile_configured_models(
+        _configured(("public-short", "llama3")),
+        RuntimeProbe(
+            live=True,
+            provider_availability="available",
+            runtime_names=frozenset({"llama3:latest", "llama3:8b"}),
+        ),
+    )
+    assert ambiguous.models[0].availability == "unavailable"
 
 
 def test_reconcile_probe_failure_never_fakes_available() -> None:
@@ -557,3 +598,160 @@ def test_api_chat_returns_model_unavailable_without_chat_post() -> None:
     assert body["error"]["details"] == {"model": "public-chat"}
     assert posts == ["GET /api/tags"]
     assert "POST /api/chat" not in posts
+
+
+# ── Ops honesty: force refresh + cache invalidation ──────────────────────────
+
+
+def test_api_refresh_forces_second_tags_get_inside_ttl() -> None:
+    tags_hits = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal tags_hits
+        assert request.url.path == "/api/tags"
+        tags_hits += 1
+        return httpx.Response(200, json={"models": [{"name": "runtime-chat"}]})
+
+    client_http = httpx.AsyncClient(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+        trust_env=False,
+    )
+    provider = OllamaProvider(
+        OllamaProviderConfig(kind="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0),
+        client=client_http,
+    )
+    config = GatewayConfig(
+        schema_version=1,
+        server=ServerConfig(host="127.0.0.1", port=8140, log_level="INFO"),
+        provider=OllamaProviderConfig(
+            kind="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0
+        ),
+        models=(
+            ModelConfig(
+                id="public-chat",
+                runtime_name="runtime-chat",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+        ),
+    )
+    with TestClient(create_app(config, provider=provider), base_url="http://127.0.0.1") as client:
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/v1/models").status_code == 200
+        assert tags_hits == 1
+        assert client.get("/healthz", params={"refresh": "true"}).status_code == 200
+        assert tags_hits == 2
+        assert client.get("/v1/models", params={"refresh": "true"}).status_code == 200
+        assert tags_hits == 3
+        # Without force, reuse holds again
+        assert client.get("/v1/models").status_code == 200
+        assert tags_hits == 3
+
+
+def test_provider_model_unavailable_invalidates_readiness_cache() -> None:
+    """Stale 'available' must not stick after provider proves model gone."""
+
+    class FlipInventoryProvider:
+        kind: Literal["ollama"] = "ollama"
+
+        def __init__(self) -> None:
+            self.discover_calls = 0
+            self.chat_calls = 0
+            self.names = frozenset({"runtime-chat"})
+
+        async def discover_runtime(self) -> RuntimeProbe:
+            self.discover_calls += 1
+            return RuntimeProbe(
+                live=True,
+                provider_availability="available",
+                runtime_names=self.names,
+            )
+
+        async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
+            del request
+            self.chat_calls += 1
+            # Provider proves absence after preflight thought it was available.
+            raise ModelUnavailableError("public-chat")
+
+        async def aclose(self) -> None:
+            return None
+
+    provider = FlipInventoryProvider()
+    gateway = Gateway(
+        ModelRegistry(
+            (
+                ModelConfig(
+                    id="public-chat",
+                    runtime_name="runtime-chat",
+                    capabilities=frozenset({Capability.CHAT}),
+                ),
+            )
+        ),
+        provider,
+    )
+    # Warm cache: model available
+    first = asyncio.run(gateway.readiness())
+    assert first.models[0].availability == "available"
+    assert provider.discover_calls == 1
+
+    with pytest.raises(ModelUnavailableError):
+        asyncio.run(
+            gateway.chat(
+                ChatCompletionRequest(
+                    model="public-chat",
+                    messages=(ChatMessage(role=MessageRole.USER, content="hello"),),
+                )
+            )
+        )
+    assert provider.chat_calls == 1
+
+    # After model_unavailable, inventory is invalid; next readiness re-probes.
+    # Simulate runtime now missing the model on the re-probe.
+    provider.names = frozenset({"other-only"})
+    second = asyncio.run(gateway.readiness())
+    assert provider.discover_calls == 2
+    assert second.models[0].availability == "unavailable"
+
+
+def test_api_models_tagged_runtime_match_is_available() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/tags"
+        return httpx.Response(
+            200,
+            json={"models": [{"name": "llama3:latest"}, {"name": "other:tag"}]},
+        )
+
+    client_http = httpx.AsyncClient(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+        trust_env=False,
+    )
+    provider = OllamaProvider(
+        OllamaProviderConfig(kind="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0),
+        client=client_http,
+    )
+    config = GatewayConfig(
+        schema_version=1,
+        server=ServerConfig(host="127.0.0.1", port=8140, log_level="INFO"),
+        provider=OllamaProviderConfig(
+            kind="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0
+        ),
+        models=(
+            ModelConfig(
+                id="public-chat",
+                runtime_name="llama3",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+            ModelConfig(
+                id="public-ambiguous",
+                runtime_name="other",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+        ),
+    )
+    # second model: only one other:tag → also unambiguous available
+    with TestClient(create_app(config, provider=provider), base_url="http://127.0.0.1") as client:
+        body = client.get("/v1/models").json()
+    by_id = {row["id"]: row["availability"] for row in body["data"]}
+    assert by_id == {"public-chat": "available", "public-ambiguous": "available"}
+    assert "llama3" not in body  # runtime names never leaked as model ids

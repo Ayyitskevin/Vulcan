@@ -194,11 +194,14 @@ deployment, or direct Athena/Icarus integration.
 
 Readiness probes Ollama via `/api/tags` and reuses one result for
 `READINESS_PROBE_TTL_SECONDS` (5s) across health, models, and chat preflight.
-Chat fails loud with `model_unavailable` when a successful live list has already
-proven the configured runtime name is absent — without calling `/api/chat`.
-When the probe is unchecked/unavailable, chat still reaches the provider and
-fails at that boundary rather than inventing a success. A shared SDK should wait
-until at least two consumers exist.
+Operators may force a re-probe with `?refresh=true` on `/healthz` or `/v1/models`.
+A configured model is available when its `runtime_name` matches a live name
+exactly, or (untagged config only) matches exactly one `name:tag` live entry;
+multi-tag collisions stay unavailable. Chat fails loud with `model_unavailable`
+when a successful live list has already proven absence (no `/api/chat` call),
+or when the provider returns that outcome (readiness cache is then invalidated).
+When the probe is unchecked/unavailable, chat still reaches the provider rather
+than inventing a success. A shared SDK should wait until at least two consumers exist.
 
 ## License
 
