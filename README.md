@@ -57,6 +57,9 @@ kind = "ollama"
 base_url = "http://127.0.0.1:11434"
 timeout_seconds = 60.0
 
+[readiness]
+probe_ttl_seconds = 5.0  # optional; 0..60, default 5; 0 = never reuse
+
 [[models]]
 id = "local-chat"                  # public client-facing ID
 runtime_name = "an-installed-model" # provider-specific name, never returned by the API
@@ -80,8 +83,9 @@ The machine-readable schema is available at `/openapi.json`; CDN-backed docs UIs
 
 | Method | Path | Contract |
 | --- | --- | --- |
-| `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, configured provider kind, model count, and honest provider readiness (`available` / `unavailable` / `unchecked`). |
-| `GET` | `/v1/models` | Configured public IDs only, descriptions, declared capabilities, provider kind, and discovery metadata from a live probe when possible. |
+| `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, configured provider kind, model count, and honest provider readiness (`available` / `unavailable` / `unchecked`). Optional `?refresh=true` forces a new probe. |
+| `GET` | `/v1/models` | Configured public IDs only, descriptions, declared capabilities, provider kind, and discovery metadata from a live probe when possible. Optional `?refresh=true`. |
+| `GET` | `/v1/models/{id}` | One configured public model with the same readiness annotation; `model_not_found` if the ID is not configured. Optional `?refresh=true`. |
 | `GET` | `/v1/capabilities` | Callable v1 gateway features: non-streaming chat, supported roles, and configuration-driven discovery. |
 | `POST` | `/v1/chat/completions` | One selected-model, non-streaming chat request. |
 
@@ -193,15 +197,17 @@ telemetry, billing, model management, auto-routing, fallback, model pull/downloa
 deployment, or direct Athena/Icarus integration.
 
 Readiness probes Ollama via `/api/tags` and reuses one result for
-`READINESS_PROBE_TTL_SECONDS` (5s) across health, models, and chat preflight.
-Operators may force a re-probe with `?refresh=true` on `/healthz` or `/v1/models`.
-A configured model is available when its `runtime_name` matches a live name
-exactly, or (untagged config only) matches exactly one `name:tag` live entry;
-multi-tag collisions stay unavailable. Chat fails loud with `model_unavailable`
-when a successful live list has already proven absence (no `/api/chat` call),
-or when the provider returns that outcome (readiness cache is then invalidated).
-When the probe is unchecked/unavailable, chat still reaches the provider rather
-than inventing a success. A shared SDK should wait until at least two consumers exist.
+`[readiness].probe_ttl_seconds` (default 5s, max 60, 0 = never reuse) across
+health, models, model retrieve, and chat preflight. Operators may force a
+re-probe with `?refresh=true`. Safe operational logs emit `readiness_probed` /
+`readiness_reused` with counts only (no runtime names). A configured model is
+available when its `runtime_name` matches a live name exactly, or (untagged
+config only) matches exactly one `name:tag` live entry; multi-tag collisions
+stay unavailable. Chat fails loud with `model_unavailable` when a successful
+live list has already proven absence (no `/api/chat` call), or when the
+provider returns that outcome (readiness cache is then invalidated). When the
+probe is unchecked/unavailable, chat still reaches the provider rather than
+inventing a success. A shared SDK should wait until at least two consumers exist.
 
 ## License
 

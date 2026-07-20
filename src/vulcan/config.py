@@ -116,10 +116,30 @@ class ModelConfig(StrictConfigModel):
         return value
 
 
+class ReadinessConfig(StrictConfigModel):
+    """Bounded reuse of one readiness probe across health/models/chat.
+
+    ``probe_ttl_seconds`` of 0 means never reuse (probe every call). Upper bound
+    keeps stale "available" memory short and explicit.
+    """
+
+    probe_ttl_seconds: float = Field(default=5.0, strict=True, ge=0.0, le=60.0)
+
+    @field_validator("probe_ttl_seconds", mode="before")
+    @classmethod
+    def probe_ttl_must_not_be_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise PydanticCustomError(
+                "boolean_not_allowed", "readiness probe_ttl_seconds must be numeric, not boolean"
+            )
+        return value
+
+
 class GatewayConfig(StrictConfigModel):
     schema_version: Literal[1]
     server: ServerConfig = Field(default_factory=ServerConfig)
     provider: ProviderConfig
+    readiness: ReadinessConfig = Field(default_factory=ReadinessConfig)
     models: tuple[ModelConfig, ...] = Field(min_length=1)
 
     @field_validator("schema_version", mode="before")

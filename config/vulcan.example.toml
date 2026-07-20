@@ -10,6 +10,11 @@ kind = "ollama"
 base_url = "http://127.0.0.1:11434"
 timeout_seconds = 60.0
 
+[readiness]
+# Reuse one /api/tags probe across health/models/chat for this many seconds.
+# 0 = probe every call. Max 60. Default 5 when the section is omitted.
+probe_ttl_seconds = 5.0
+
 [[models]]
 id = "local-chat"
 runtime_name = "replace-with-an-installed-ollama-model"

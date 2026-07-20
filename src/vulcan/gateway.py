@@ -57,6 +57,29 @@ class Gateway:
         self._readiness_ttl_seconds = readiness_ttl_seconds
         self._cached_readiness: _CachedReadiness | None = None
 
+    def _readiness_log_metadata(
+        self,
+        report: DiscoveryReadiness,
+        *,
+        forced: bool,
+        reused: bool,
+    ) -> dict[str, object]:
+        counts = {"available": 0, "unavailable": 0, "unchecked": 0}
+        for item in report.models:
+            counts[item.availability] += 1
+        return {
+            "provider": self.provider.kind,
+            "live": report.live,
+            "provider_availability": report.provider_availability,
+            "models_configured": len(report.models),
+            "models_available": counts["available"],
+            "models_unavailable": counts["unavailable"],
+            "models_unchecked": counts["unchecked"],
+            "forced": forced,
+            "reused": reused,
+            "probe_ttl_seconds": self._readiness_ttl_seconds,
+        }
+
     async def readiness(self, *, force: bool = False) -> DiscoveryReadiness:
         """Probe (or reuse) provider readiness and reconcile configured models only.
 
@@ -71,13 +94,22 @@ class Gateway:
             and self._cached_readiness is not None
             and now < self._cached_readiness.expires_at
         ):
-            return self._cached_readiness.report
+            report = self._cached_readiness.report
+            logger.info(
+                "readiness_reused",
+                extra={"metadata": self._readiness_log_metadata(report, forced=False, reused=True)},
+            )
+            return report
 
         probe = await self.provider.discover_runtime()
         report = reconcile_configured_models(self.registry.list(), probe)
         self._cached_readiness = _CachedReadiness(
             report=report,
             expires_at=now + self._readiness_ttl_seconds,
+        )
+        logger.info(
+            "readiness_probed",
+            extra={"metadata": self._readiness_log_metadata(report, forced=force, reused=False)},
         )
         return report
 
