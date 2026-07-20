@@ -1,0 +1,102 @@
+"""Honest readiness/discovery reconciliation for configured public models.
+
+The registry remains the only source of model *identity*. Live runtime probes
+only annotate whether a configured runtime_name is present. Vulcan never invents
+public IDs from the runtime list and never claims "available" when a probe fails.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from vulcan.registry import ConfiguredModel
+
+Availability = Literal["available", "unavailable", "unchecked"]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProbe:
+    """Outcome of one provider readiness probe.
+
+    ``live`` is True only when the provider returned a usable runtime name set.
+    ``runtime_names`` is None whenever the probe did not successfully list names.
+    """
+
+    live: bool
+    provider_availability: Availability
+    runtime_names: frozenset[str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelReadiness:
+    model_id: str
+    availability: Availability
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryReadiness:
+    source: Literal["configuration"]
+    live: bool
+    availability: Availability
+    provider_availability: Availability
+    models: tuple[ModelReadiness, ...]
+
+
+def reconcile_configured_models(
+    configured: tuple[ConfiguredModel, ...],
+    probe: RuntimeProbe,
+) -> DiscoveryReadiness:
+    """Map configured models onto a probe without inventing IDs or loaded state.
+
+    Rules:
+    - Configured public IDs are the only models returned.
+    - Successful live list → each model is available iff its runtime_name is
+      present in the runtime set; discovery.live is True.
+    - Failed / incomplete probe → models stay unchecked (never fake available).
+    - A non-live provider that is still known ready (deterministic) may mark
+      models available without claiming a live runtime inventory.
+    """
+
+    if probe.live and probe.runtime_names is not None:
+        names = probe.runtime_names
+        models = tuple(
+            ModelReadiness(
+                model_id=model.id,
+                availability="available" if model.runtime_name in names else "unavailable",
+            )
+            for model in configured
+        )
+        return DiscoveryReadiness(
+            source="configuration",
+            live=True,
+            availability=probe.provider_availability,
+            provider_availability=probe.provider_availability,
+            models=models,
+        )
+
+    # No successful live inventory. Deterministic (available, non-live) is known
+    # ready in-process; transport/protocol failures stay fail-loud as unchecked
+    # or unavailable at the provider layer and unchecked per model.
+    if probe.provider_availability == "available" and not probe.live:
+        models = tuple(
+            ModelReadiness(model_id=model.id, availability="available") for model in configured
+        )
+        return DiscoveryReadiness(
+            source="configuration",
+            live=False,
+            availability="available",
+            provider_availability="available",
+            models=models,
+        )
+
+    models = tuple(
+        ModelReadiness(model_id=model.id, availability="unchecked") for model in configured
+    )
+    return DiscoveryReadiness(
+        source="configuration",
+        live=False,
+        availability=probe.provider_availability,
+        provider_availability=probe.provider_availability,
+        models=models,
+    )

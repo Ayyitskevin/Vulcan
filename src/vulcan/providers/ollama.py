@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vulcan.config import OllamaProviderConfig
 from vulcan.errors import (
@@ -21,6 +21,7 @@ from vulcan.providers.base import (
     ProviderChatResult,
     ProviderTokenUsage,
 )
+from vulcan.readiness import RuntimeProbe
 
 
 class _OllamaMessage(BaseModel):
@@ -38,6 +39,19 @@ class _OllamaChatResponse(BaseModel):
     done_reason: str | None = None
     prompt_eval_count: int | None = None
     eval_count: int | None = None
+
+
+class _OllamaTagModel(BaseModel):
+    # Ollama returns JSON arrays; allow list→model coercion (not strict tuples).
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(min_length=1)
+
+
+class _OllamaTagsResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    models: list[_OllamaTagModel] = Field(default_factory=list)
 
 
 class OllamaProvider:
@@ -127,6 +141,32 @@ class OllamaProvider:
             finish_reason=finish_reason,
             usage=usage,
         )
+
+    async def discover_runtime(self) -> RuntimeProbe:
+        """List installed runtime names via Ollama ``/api/tags`` with finite timeout.
+
+        Failures never invent availability: transport errors → unavailable,
+        timeouts and protocol/malformed bodies → unchecked, successful lists →
+        available with the exact name set returned by the runtime.
+        """
+
+        try:
+            response = await self._client.get("/api/tags")
+        except httpx.TimeoutException:
+            return RuntimeProbe(live=False, provider_availability="unchecked", runtime_names=None)
+        except httpx.RequestError:
+            return RuntimeProbe(live=False, provider_availability="unavailable", runtime_names=None)
+
+        if not response.is_success:
+            return RuntimeProbe(live=False, provider_availability="unavailable", runtime_names=None)
+
+        try:
+            parsed = _OllamaTagsResponse.model_validate(response.json())
+        except (ValueError, ValidationError):
+            return RuntimeProbe(live=False, provider_availability="unchecked", runtime_names=None)
+
+        names = frozenset(model.name for model in parsed.models)
+        return RuntimeProbe(live=True, provider_availability="available", runtime_names=names)
 
     async def aclose(self) -> None:
         await self._client.aclose()

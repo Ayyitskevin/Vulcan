@@ -48,9 +48,12 @@ class ChatCompletionRequest(StrictSchema):
         return self
 
 
+Availability = Literal["available", "unavailable", "unchecked"]
+
+
 class ProviderHealth(StrictSchema):
     kind: Literal["ollama", "deterministic"]
-    availability: Literal["unchecked"] = "unchecked"
+    availability: Availability
 
 
 class HealthResponse(StrictSchema):
@@ -63,8 +66,8 @@ class HealthResponse(StrictSchema):
 
 class DiscoveryMetadata(StrictSchema):
     source: Literal["configuration"] = "configuration"
-    live: Literal[False] = False
-    availability: Literal["unchecked"] = "unchecked"
+    live: bool = False
+    availability: Availability = "unchecked"
 
 
 class ModelRecord(StrictSchema):
@@ -72,13 +75,13 @@ class ModelRecord(StrictSchema):
     object: Literal["model"] = "model"
     provider: Literal["ollama", "deterministic"]
     capabilities: tuple[Capability, ...]
-    availability: Literal["unchecked"] = "unchecked"
+    availability: Availability = "unchecked"
     description: str | None = None
 
 
 class ModelListResponse(StrictSchema):
     object: Literal["list"] = "list"
-    discovery: DiscoveryMetadata = Field(default_factory=DiscoveryMetadata)
+    discovery: DiscoveryMetadata
     data: tuple[ModelRecord, ...]
 
 

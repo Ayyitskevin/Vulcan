@@ -17,8 +17,12 @@ one explicitly selected provider and never falls back to another provider or a f
 - Stable structured errors and content-safe operational JSON logs.
 - Loopback-only server, provider URL, and HTTP `Host` validation.
 
-Model discovery is not live in this release. Responses say `source: "configuration"`,
-`live: false`, and `availability: "unchecked"`; a listed model is declared, not proven loaded.
+Model discovery remains configuration-owned: Vulcan never invents public IDs from a
+runtime inventory. When the selected provider is Ollama, `/healthz` and `/v1/models`
+probe `/api/tags` with the configured finite timeout and annotate each *configured*
+public ID as `available`, `unavailable`, or `unchecked`. Probe failures never claim
+loaded state. The deterministic provider is non-network and reports known-ready
+without a live inventory (`live: false`).
 
 ## Local setup
 
@@ -76,8 +80,8 @@ The machine-readable schema is available at `/openapi.json`; CDN-backed docs UIs
 
 | Method | Path | Contract |
 | --- | --- | --- |
-| `GET` | `/healthz` | Gateway liveness, API version, configured provider kind, model count. Provider availability remains `unchecked`. |
-| `GET` | `/v1/models` | Configured public IDs, descriptions, declared capabilities, provider kind, and honest discovery metadata. |
+| `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, configured provider kind, model count, and honest provider readiness (`available` / `unavailable` / `unchecked`). |
+| `GET` | `/v1/models` | Configured public IDs only, descriptions, declared capabilities, provider kind, and discovery metadata from a live probe when possible. |
 | `GET` | `/v1/capabilities` | Callable v1 gateway features: non-streaming chat, supported roles, and configuration-driven discovery. |
 | `POST` | `/v1/chat/completions` | One selected-model, non-streaming chat request. |
 
@@ -183,14 +187,13 @@ checks logs for prompt/response sentinels, and shuts the process down.
 
 ## Deliberate limitations
 
-The first slice has one provider per process, configuration-only discovery, text-only messages,
-non-streaming chat, and no readiness probe that loads or lists runtime models. It has no auth,
-multi-user state, telemetry, billing, model management, auto-routing, agents, UI, deployment,
-or direct Athena/Icarus integration.
+Vulcan has one provider per process, text-only messages, non-streaming chat, and configuration-
+owned discovery (runtime probes only annotate configured IDs). It has no auth, multi-user state,
+telemetry, billing, model management, auto-routing, fallback, model pull/download, agents, UI,
+deployment, or direct Athena/Icarus integration.
 
-The next logical slice is live-but-honest readiness/discovery reconciliation for the configured
-Ollama registry, after real clients validate the v1 HTTP contract. A shared SDK should wait until
-at least two consumers exist.
+This slice adds live-but-honest Ollama readiness/discovery reconciliation via `/api/tags`.
+A shared SDK should wait until at least two consumers exist.
 
 ## License
 
