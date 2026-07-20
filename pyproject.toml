@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vulcan-local-gateway"
+version = "0.1.0"
+description = "A dependable local-first AI inference gateway"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+authors = [{ name = "Kevin Lee" }]
+dependencies = [
+    "fastapi>=0.139,<1",
+    "httpx>=0.28,<1",
+    "pydantic>=2.13,<3",
+    "uvicorn>=0.51,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.7,<3",
+    "pytest>=9.1,<10",
+    "ruff>=0.15,<1",
+]
+
+[project.scripts]
+vulcan = "vulcan.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]

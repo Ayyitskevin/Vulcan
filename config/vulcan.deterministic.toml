@@ -1,0 +1,16 @@
+schema_version = 1
+
+[server]
+host = "127.0.0.1"
+port = 8140
+log_level = "INFO"
+
+[provider]
+kind = "deterministic"
+response_text = "vulcan-deterministic-response"
+
+[[models]]
+id = "vulcan-test"
+runtime_name = "vulcan-test"
+capabilities = ["chat"]
+description = "Deterministic no-I/O test model"

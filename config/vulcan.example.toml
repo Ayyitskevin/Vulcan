@@ -1,0 +1,17 @@
+schema_version = 1
+
+[server]
+host = "127.0.0.1"
+port = 8140
+log_level = "INFO"
+
+[provider]
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+timeout_seconds = 60.0
+
+[[models]]
+id = "local-chat"
+runtime_name = "replace-with-an-installed-ollama-model"
+capabilities = ["chat"]
+description = "A locally configured chat model"
