@@ -270,20 +270,33 @@ def create_app(
         responses={400: {"model": ErrorEnvelope}},
     )
     async def healthz() -> HealthResponse:
+        # Gateway liveness is always ok if this handler runs. Provider readiness
+        # is a separate probe and never overrides the process-up signal.
+        readiness = await gateway.readiness()
         return HealthResponse(
-            provider=ProviderHealth(kind=selected_provider.kind),
+            provider=ProviderHealth(
+                kind=selected_provider.kind,
+                availability=readiness.provider_availability,
+            ),
             models_configured=len(registry.list()),
         )
 
     @app.get("/v1/models", response_model=ModelListResponse, responses=ERROR_RESPONSES)
     async def list_models() -> ModelListResponse:
+        readiness = await gateway.readiness()
+        by_id = {item.model_id: item.availability for item in readiness.models}
         return ModelListResponse(
-            discovery=DiscoveryMetadata(),
+            discovery=DiscoveryMetadata(
+                source=readiness.source,
+                live=readiness.live,
+                availability=readiness.availability,
+            ),
             data=tuple(
                 ModelRecord(
                     id=model.id,
                     provider=selected_provider.kind,
                     capabilities=tuple(sorted(model.capabilities, key=str)),
+                    availability=by_id[model.id],
                     description=model.description,
                 )
                 for model in registry.list()

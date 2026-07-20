@@ -147,7 +147,7 @@ def _expected_error(
     }
 
 
-def test_healthz_reports_liveness_without_claiming_provider_availability() -> None:
+def test_healthz_reports_liveness_and_deterministic_provider_readiness() -> None:
     with _client(create_app(_config())) as client:
         response = client.get("/healthz")
 
@@ -156,7 +156,7 @@ def test_healthz_reports_liveness_without_claiming_provider_availability() -> No
         "status": "ok",
         "service": "vulcan",
         "api_version": "v1",
-        "provider": {"kind": "deterministic", "availability": "unchecked"},
+        "provider": {"kind": "deterministic", "availability": "available"},
         "models_configured": 2,
     }
     _assert_request_id(response)
@@ -172,7 +172,7 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
         "discovery": {
             "source": "configuration",
             "live": False,
-            "availability": "unchecked",
+            "availability": "available",
         },
         "data": [
             {
@@ -180,7 +180,7 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
                 "object": "model",
                 "provider": "deterministic",
                 "capabilities": ["chat"],
-                "availability": "unchecked",
+                "availability": "available",
                 "description": "Configured chat model",
             },
             {
@@ -188,7 +188,7 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
                 "object": "model",
                 "provider": "deterministic",
                 "capabilities": ["embeddings"],
-                "availability": "unchecked",
+                "availability": "available",
                 "description": None,
             },
         ],

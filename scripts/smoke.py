@@ -128,13 +128,14 @@ capabilities = ["chat"]
                 },
             )
             assert health_status == models_status == capabilities_status == chat_status == 200
-            assert health["provider"] == {"kind": "deterministic", "availability": "unchecked"}
+            assert health["provider"] == {"kind": "deterministic", "availability": "available"}
             assert models["discovery"] == {
                 "source": "configuration",
                 "live": False,
-                "availability": "unchecked",
+                "availability": "available",
             }
             assert models["data"][0]["id"] == "vulcan-smoke"
+            assert models["data"][0]["availability"] == "available"
             assert capabilities["chat_completions"]["streaming"] is False
             assert chat["choices"][0]["message"]["content"] == RESPONSE_SENTINEL
         finally:

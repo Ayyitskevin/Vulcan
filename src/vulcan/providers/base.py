@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from vulcan.readiness import RuntimeProbe
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderMessage:
@@ -41,6 +43,9 @@ class Provider(Protocol):
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
         """Submit one non-streaming chat request."""
+
+    async def discover_runtime(self) -> RuntimeProbe:
+        """Probe provider readiness without inventing model inventory."""
 
     async def aclose(self) -> None:
         """Release provider resources."""

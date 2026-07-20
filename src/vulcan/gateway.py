@@ -10,6 +10,7 @@ from uuid import uuid4
 from vulcan.config import Capability
 from vulcan.errors import UnsupportedCapabilityError, VulcanError
 from vulcan.providers.base import Provider, ProviderChatRequest, ProviderMessage
+from vulcan.readiness import DiscoveryReadiness, reconcile_configured_models
 from vulcan.registry import ModelRegistry
 from vulcan.schemas import (
     AssistantMessage,
@@ -39,6 +40,12 @@ class Gateway:
         self.provider = provider
         self._clock = clock
         self._id_factory = id_factory
+
+    async def readiness(self) -> DiscoveryReadiness:
+        """Probe the selected provider and reconcile configured public models only."""
+
+        probe = await self.provider.discover_runtime()
+        return reconcile_configured_models(self.registry.list(), probe)
 
     async def chat(
         self,
