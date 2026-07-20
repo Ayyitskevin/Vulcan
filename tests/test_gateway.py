@@ -26,11 +26,18 @@ class RecordingProvider:
 
     def __init__(self, result: ProviderChatResult | None = None) -> None:
         self.calls: list[ProviderChatRequest] = []
+        self.discover_calls = 0
         self.result = result or ProviderChatResult(content="unused", finish_reason="stop")
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
         self.calls.append(request)
         return self.result
+
+    async def discover_runtime(self):
+        from vulcan.readiness import RuntimeProbe
+
+        self.discover_calls += 1
+        return RuntimeProbe(live=False, provider_availability="available", runtime_names=None)
 
     async def aclose(self) -> None:
         return None

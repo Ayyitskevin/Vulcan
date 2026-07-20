@@ -52,6 +52,9 @@ class ModelUnavailableError(VulcanError):
     retryable = False
     message = "The configured model is unavailable in the local provider."
 
+    def __init__(self, model_id: str | None = None) -> None:
+        super().__init__(details={"model": model_id} if model_id is not None else None)
+
 
 class ProviderTimeoutError(VulcanError):
     code = "provider_timeout"

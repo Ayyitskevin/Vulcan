@@ -56,6 +56,11 @@ class SequencedProvider:
         except RuntimeError as exc:
             raise ProviderUnavailableError from exc
 
+    async def discover_runtime(self):
+        from vulcan.readiness import RuntimeProbe
+
+        return RuntimeProbe(live=False, provider_availability="available", runtime_names=None)
+
     async def aclose(self) -> None:
         self.closed = True
 
