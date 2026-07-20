@@ -10,6 +10,7 @@ from vulcan.config import (
     ConfigLoadError,
     GatewayConfig,
     OllamaProviderConfig,
+    ReadinessConfig,
     ServerConfig,
     load_config,
 )
@@ -24,6 +25,33 @@ def test_server_defaults_to_ipv4_loopback() -> None:
 
     assert server.host == "127.0.0.1"
     assert server.port == 8140
+
+
+def test_readiness_defaults_and_bounds() -> None:
+    assert ReadinessConfig().probe_ttl_seconds == 5.0
+    assert ReadinessConfig(probe_ttl_seconds=0.0).probe_ttl_seconds == 0.0
+    assert ReadinessConfig(probe_ttl_seconds=60.0).probe_ttl_seconds == 60.0
+    with pytest.raises(ValidationError):
+        ReadinessConfig(probe_ttl_seconds=-0.1)
+    with pytest.raises(ValidationError):
+        ReadinessConfig(probe_ttl_seconds=60.1)
+    with pytest.raises(ValidationError):
+        ReadinessConfig(probe_ttl_seconds=True)  # type: ignore[arg-type]
+
+
+def test_gateway_config_defaults_readiness_when_section_omitted(
+    valid_config_document: dict[str, Any],
+) -> None:
+    config = GatewayConfig.model_validate(valid_config_document)
+    assert config.readiness.probe_ttl_seconds == 5.0
+
+
+def test_gateway_config_accepts_readiness_probe_ttl(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["readiness"] = {"probe_ttl_seconds": 0.0}
+    config = GatewayConfig.model_validate(valid_config_document)
+    assert config.readiness.probe_ttl_seconds == 0.0
 
 
 @pytest.mark.parametrize(

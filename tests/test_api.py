@@ -303,7 +303,7 @@ def test_chat_maps_public_model_to_runtime_name_and_preserves_provider_usage() -
     assert provider.closed is True
 
 
-def test_openapi_contains_only_the_four_documented_application_routes() -> None:
+def test_openapi_contains_only_the_documented_application_routes() -> None:
     with _client(create_app(_config())) as client:
         response = client.get("/openapi.json")
 
@@ -315,11 +315,38 @@ def test_openapi_contains_only_the_four_documented_application_routes() -> None:
     } == {
         "/healthz": ["get"],
         "/v1/models": ["get"],
+        "/v1/models/{model_id}": ["get"],
         "/v1/capabilities": ["get"],
         "/v1/chat/completions": ["post"],
     }
     assert schema["info"]["license"] == {"name": "AGPL-3.0-only"}
     _assert_request_id(response)
+
+
+def test_get_model_returns_configured_model_with_readiness() -> None:
+    with _client(create_app(_config())) as client:
+        response = client.get("/v1/models/public-chat")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "public-chat"
+    assert body["object"] == "model"
+    assert body["provider"] == "deterministic"
+    assert body["capabilities"] == ["chat"]
+    assert body["availability"] == "available"
+    assert RUNTIME_SENTINEL not in response.text
+    _assert_request_id(response)
+
+
+def test_get_model_unknown_id_is_model_not_found() -> None:
+    with _client(create_app(_config())) as client:
+        response = client.get("/v1/models/does-not-exist")
+
+    assert response.status_code == 404
+    request_id = _assert_request_id(response, error_body=True)
+    assert response.json()["error"]["code"] == "model_not_found"
+    assert response.json()["error"]["details"] == {"model": "does-not-exist"}
+    assert response.json()["request_id"] == request_id
 
 
 def test_interactive_docs_are_disabled_without_removing_the_openapi_contract() -> None:

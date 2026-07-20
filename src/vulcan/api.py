@@ -25,6 +25,7 @@ from vulcan.providers.base import Provider
 from vulcan.providers.factory import build_provider
 from vulcan.registry import ModelRegistry
 from vulcan.schemas import (
+    Availability,
     CapabilitiesResponse,
     ChatCapability,
     ChatCompletionRequest,
@@ -139,10 +140,13 @@ def create_app(
 ) -> FastAPI:
     registry = ModelRegistry(config.models)
     selected_provider = provider or build_provider(config.provider)
-    if id_factory is None:
-        gateway = Gateway(registry, selected_provider, clock=clock)
-    else:
-        gateway = Gateway(registry, selected_provider, clock=clock, id_factory=id_factory)
+    gateway_kwargs: dict[str, Any] = {
+        "clock": clock,
+        "readiness_ttl_seconds": config.readiness.probe_ttl_seconds,
+    }
+    if id_factory is not None:
+        gateway_kwargs["id_factory"] = id_factory
+    gateway = Gateway(registry, selected_provider, **gateway_kwargs)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -282,6 +286,16 @@ def create_app(
             models_configured=len(registry.list()),
         )
 
+    def _model_record(model_id: str, availability: Availability) -> ModelRecord:
+        model = registry.get(model_id)
+        return ModelRecord(
+            id=model.id,
+            provider=selected_provider.kind,
+            capabilities=tuple(sorted(model.capabilities, key=str)),
+            availability=availability,
+            description=model.description,
+        )
+
     @app.get("/v1/models", response_model=ModelListResponse, responses=ERROR_RESPONSES)
     async def list_models(refresh: bool = False) -> ModelListResponse:
         # refresh=true forces a new probe (bypasses the short TTL reuse bound).
@@ -293,17 +307,22 @@ def create_app(
                 live=readiness.live,
                 availability=readiness.availability,
             ),
-            data=tuple(
-                ModelRecord(
-                    id=model.id,
-                    provider=selected_provider.kind,
-                    capabilities=tuple(sorted(model.capabilities, key=str)),
-                    availability=by_id[model.id],
-                    description=model.description,
-                )
-                for model in registry.list()
-            ),
+            data=tuple(_model_record(model.id, by_id[model.id]) for model in registry.list()),
         )
+
+    @app.get(
+        "/v1/models/{model_id}",
+        response_model=ModelRecord,
+        responses=ERROR_RESPONSES,
+    )
+    async def get_model(model_id: str, refresh: bool = False) -> ModelRecord:
+        """Retrieve one configured public model with the same readiness annotation."""
+
+        # Raise the stable model_not_found envelope for unknown public IDs.
+        registry.get(model_id)
+        readiness = await gateway.readiness(force=refresh)
+        by_id = {item.model_id: item.availability for item in readiness.models}
+        return _model_record(model_id, by_id[model_id])
 
     @app.get(
         "/v1/capabilities",
