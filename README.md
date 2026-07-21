@@ -18,11 +18,11 @@ one explicitly selected provider and never falls back to another provider or a f
 - Loopback-only server, provider URL, and HTTP `Host` validation.
 
 Model discovery remains configuration-owned: Vulcan never invents public IDs from a
-runtime inventory. When the selected provider is Ollama, `/healthz` and `/v1/models`
-probe `/api/tags` with the configured finite timeout and annotate each *configured*
-public ID as `available`, `unavailable`, or `unchecked`. Probe failures never claim
-loaded state. The deterministic provider is non-network and reports known-ready
-without a live inventory (`live: false`).
+runtime inventory. `/healthz` is a process-only liveness check and never performs provider I/O.
+When the selected provider is Ollama, `/v1/models` and `/v1/models/{id}` probe `/api/tags`
+with the configured finite timeout and annotate each *configured* public ID as `available`,
+`unavailable`, or `unchecked`. Probe failures never claim loaded state. The deterministic
+provider is non-network and reports known-ready without a live inventory (`live: false`).
 
 ## Local setup
 
@@ -83,7 +83,7 @@ The machine-readable schema is available at `/openapi.json`; CDN-backed docs UIs
 
 | Method | Path | Contract |
 | --- | --- | --- |
-| `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, configured provider kind, model count, and honest provider readiness (`available` / `unavailable` / `unchecked`). Optional `?refresh=true` forces a new probe. |
+| `GET` | `/healthz` | Process-only gateway liveness (`status: ok`), API version, configured provider kind, model count, and provider availability `unchecked`; never performs provider I/O. |
 | `GET` | `/v1/models` | Configured public IDs only, descriptions, declared capabilities, provider kind, and discovery metadata from a live probe when possible. Optional `?refresh=true`. |
 | `GET` | `/v1/models/{id}` | One configured public model with the same readiness annotation; `model_not_found` if the ID is not configured. Optional `?refresh=true`. |
 | `GET` | `/v1/capabilities` | Callable v1 gateway features: non-streaming chat, supported roles, and configuration-driven discovery. |
@@ -198,8 +198,8 @@ deployment, or direct Athena/Icarus integration.
 
 Readiness probes Ollama via `/api/tags` and reuses one result for
 `[readiness].probe_ttl_seconds` (default 5s, max 60, 0 = never reuse) across
-health, models, model retrieve, and chat preflight. Operators may force a
-re-probe with `?refresh=true`. Safe operational logs emit `readiness_probed` /
+model list, model retrieve, and chat preflight. Operators may force a re-probe
+with `?refresh=true` on either model endpoint. Safe operational logs emit `readiness_probed` /
 `readiness_reused` with counts only (no runtime names). A configured model is
 available when its `runtime_name` matches a live name exactly, or (untagged
 config only) matches exactly one `name:tag` live entry; multi-tag collisions

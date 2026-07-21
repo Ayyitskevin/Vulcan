@@ -128,7 +128,7 @@ capabilities = ["chat"]
                 },
             )
             assert health_status == models_status == capabilities_status == chat_status == 200
-            assert health["provider"] == {"kind": "deterministic", "availability": "available"}
+            assert health["provider"] == {"kind": "deterministic", "availability": "unchecked"}
             assert models["discovery"] == {
                 "source": "configuration",
                 "live": False,

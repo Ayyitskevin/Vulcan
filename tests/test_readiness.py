@@ -278,7 +278,7 @@ def test_api_models_and_health_surface_live_reconciliation() -> None:
 
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
-    assert health.json()["provider"] == {"kind": "ollama", "availability": "available"}
+    assert health.json()["provider"] == {"kind": "ollama", "availability": "unchecked"}
     assert health.json()["models_configured"] == 2
 
     assert models.status_code == 200
@@ -326,7 +326,7 @@ def test_api_models_stay_unchecked_when_ollama_is_down() -> None:
         models = client.get("/v1/models").json()
 
     assert health["status"] == "ok"  # process liveness independent of provider
-    assert health["provider"]["availability"] == "unavailable"
+    assert health["provider"]["availability"] == "unchecked"
     assert models["discovery"] == {
         "source": "configuration",
         "live": False,
@@ -640,12 +640,12 @@ def test_api_refresh_forces_second_tags_get_inside_ttl() -> None:
         assert client.get("/v1/models").status_code == 200
         assert tags_hits == 1
         assert client.get("/healthz", params={"refresh": "true"}).status_code == 200
-        assert tags_hits == 2
+        assert tags_hits == 1
         assert client.get("/v1/models", params={"refresh": "true"}).status_code == 200
-        assert tags_hits == 3
+        assert tags_hits == 2
         # Without force, reuse holds again
         assert client.get("/v1/models").status_code == 200
-        assert tags_hits == 3
+        assert tags_hits == 2
 
 
 def test_provider_model_unavailable_invalidates_readiness_cache() -> None:

@@ -72,7 +72,7 @@ def test_zero_ttl_probes_every_call() -> None:
         assert client.get("/healthz").status_code == 200
         assert client.get("/v1/models").status_code == 200
         assert client.get("/v1/models/public-chat").status_code == 200
-    assert hits == 3
+    assert hits == 2
 
 
 def test_get_model_shares_probe_cache_and_refresh() -> None:
@@ -167,6 +167,6 @@ def test_create_app_honors_config_probe_ttl() -> None:
 
     client, _ = _ollama_app(handler, ttl=0.0)
     with client:
-        client.get("/healthz")
-        client.get("/healthz")
+        client.get("/v1/models")
+        client.get("/v1/models")
     assert hits == 2

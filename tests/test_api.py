@@ -154,18 +154,20 @@ def _expected_error(
     }
 
 
-def test_healthz_reports_liveness_and_deterministic_provider_readiness() -> None:
-    with _client(create_app(_config())) as client:
-        response = client.get("/healthz")
+def test_healthz_reports_liveness_without_calling_provider_readiness() -> None:
+    provider = RecordingProvider()
+    with _client(create_app(_config(), provider=provider)) as client:
+        response = client.get("/healthz", params={"refresh": "true"})
 
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
         "service": "vulcan",
         "api_version": "v1",
-        "provider": {"kind": "deterministic", "availability": "available"},
+        "provider": {"kind": "deterministic", "availability": "unchecked"},
         "models_configured": 2,
     }
+    assert provider.discover_calls == 0
     _assert_request_id(response)
 
 
