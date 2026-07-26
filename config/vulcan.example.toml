@@ -1,22 +1,109 @@
-schema_version = 1
+# Vulcan schema v2: explicitly configured local and BYOK providers.
+# Credentials NEVER go in this file — hosted providers name an environment
+# variable via api_key_env and Vulcan reads it at request time.
+# All aliases, model names, and variable names below are placeholders.
+
+schema_version = 2
 
 [server]
-host = "127.0.0.1"
+host = "127.0.0.1" # loopback only
 port = 8140
 log_level = "INFO"
 
-[provider]
-kind = "ollama"
-base_url = "http://127.0.0.1:11434"
+[readiness]
+# Reuse one Ollama /api/tags probe across health/models/chat for this many
+# seconds. 0 = probe every call. Max 60. Default 5 when the section is omitted.
+# Hosted providers are never probed; they stay "unchecked" until used.
+probe_ttl_seconds = 5.0
+
+# ---------------------------------------------------------------------------
+# Providers: named instances. IDs are lowercase [a-z0-9_-], operator-chosen,
+# and appear in API metadata and logs (they are safe, non-secret values).
+# ---------------------------------------------------------------------------
+
+[providers.local-ollama]
+type = "ollama"
+base_url = "http://127.0.0.1:11434" # loopback only, no path
 timeout_seconds = 60.0
 
-[readiness]
-# Reuse one /api/tags probe across health/models/chat for this many seconds.
-# 0 = probe every call. Max 60. Default 5 when the section is omitted.
-probe_ttl_seconds = 5.0
+[providers.openai]
+type = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+api_key_env = "VULCAN_OPENAI_API_KEY"
+timeout_seconds = 60.0
+# Newer OpenAI models require the renamed token-limit field:
+# max_tokens_field = "max_completion_tokens"
+
+[providers.anthropic]
+type = "anthropic"
+# base_url defaults to https://api.anthropic.com and can usually be omitted.
+api_key_env = "VULCAN_ANTHROPIC_API_KEY"
+timeout_seconds = 60.0
+# The Anthropic API requires max_tokens; used when a request does not set it.
+default_max_tokens = 4096
+
+[providers.moonshot]
+type = "openai_compatible"
+base_url = "https://api.moonshot.ai/v1"
+api_key_env = "VULCAN_MOONSHOT_API_KEY"
+timeout_seconds = 60.0
+
+[providers.zai]
+type = "openai_compatible"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "VULCAN_ZAI_API_KEY"
+timeout_seconds = 60.0
+
+[providers.xai]
+type = "openai_compatible"
+base_url = "https://api.x.ai/v1"
+api_key_env = "VULCAN_XAI_API_KEY"
+timeout_seconds = 60.0
+
+# ---------------------------------------------------------------------------
+# Models: every public alias routes to exactly one provider and one
+# provider-native model name. No fallback, ever. The alias (`id`) is the only
+# name clients see; `provider_model` never leaves the process.
+# ---------------------------------------------------------------------------
 
 [[models]]
 id = "local-chat"
-runtime_name = "replace-with-an-installed-ollama-model"
+provider = "local-ollama"
+provider_model = "replace-with-an-installed-ollama-model"
 capabilities = ["chat"]
 description = "A locally configured chat model"
+
+[[models]]
+id = "openai-chat"
+provider = "openai"
+provider_model = "example-openai-model"
+capabilities = ["chat"]
+description = "OpenAI chat model (BYOK)"
+
+[[models]]
+id = "anthropic-chat"
+provider = "anthropic"
+provider_model = "example-anthropic-model"
+capabilities = ["chat"]
+description = "Anthropic chat model (BYOK)"
+
+[[models]]
+id = "kimi-chat"
+provider = "moonshot"
+provider_model = "example-kimi-model"
+capabilities = ["chat"]
+description = "Moonshot/Kimi chat model (BYOK)"
+
+[[models]]
+id = "glm-chat"
+provider = "zai"
+provider_model = "example-glm-model"
+capabilities = ["chat"]
+description = "Z.AI/GLM chat model (BYOK)"
+
+[[models]]
+id = "grok-chat"
+provider = "xai"
+provider_model = "example-grok-model"
+capabilities = ["chat"]
+description = "xAI/Grok chat model (BYOK)"

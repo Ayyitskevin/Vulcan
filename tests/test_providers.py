@@ -37,12 +37,12 @@ MockHandler = Callable[[httpx.Request], Coroutine[None, None, httpx.Response]]
 
 def _chat_request(
     *,
-    runtime_model: str = "runtime-model",
+    provider_model: str = "runtime-model",
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> ProviderChatRequest:
     return ProviderChatRequest(
-        runtime_model=runtime_model,
+        provider_model=provider_model,
         messages=(
             ProviderMessage(role="system", content="Be concise."),
             ProviderMessage(role="user", content="Say hello."),
@@ -54,7 +54,7 @@ def _chat_request(
 
 def _ollama_config() -> OllamaProviderConfig:
     return OllamaProviderConfig(
-        kind="ollama",
+        type="ollama",
         base_url="http://127.0.0.1:11434",
         timeout_seconds=1.0,
     )
@@ -70,7 +70,7 @@ async def _invoke_ollama(
         transport=httpx.MockTransport(handler),
         trust_env=False,
     )
-    provider = OllamaProvider(_ollama_config(), client=client)
+    provider = OllamaProvider("local-ollama", _ollama_config(), client=client)
     try:
         return await provider.chat(request or _chat_request())
     finally:
@@ -79,10 +79,12 @@ async def _invoke_ollama(
 
 def test_factory_selects_deterministic_provider_exactly() -> None:
     provider = build_provider(
-        DeterministicProviderConfig(kind="deterministic", response_text="fixed")
+        "det", DeterministicProviderConfig(type="deterministic", response_text="fixed")
     )
 
     assert type(provider) is DeterministicProvider
+    assert provider.provider_id == "det"
+    assert provider.provider_type == "deterministic"
 
 
 def test_factory_selects_ollama_provider_exactly() -> None:
@@ -93,9 +95,11 @@ def test_factory_selects_ollama_provider_exactly() -> None:
         base_url="http://127.0.0.1:11434",
         transport=httpx.MockTransport(handler),
     )
-    provider = build_provider(_ollama_config(), ollama_client=client)
+    provider = build_provider("local-ollama", _ollama_config(), client=client)
 
     assert type(provider) is OllamaProvider
+    assert provider.provider_id == "local-ollama"
+    assert provider.provider_type == "ollama"
     asyncio.run(provider.aclose())
 
 
@@ -103,7 +107,7 @@ def test_factory_has_no_unknown_provider_fallback() -> None:
     unknown_config = cast(ProviderConfig, object())
 
     with pytest.raises(AssertionError):
-        build_provider(unknown_config)
+        build_provider("unknown", unknown_config)
 
 
 def test_deterministic_provider_is_repeatable_and_performs_no_http_io(
@@ -114,13 +118,14 @@ def test_deterministic_provider_is_repeatable_and_performs_no_http_io(
 
     monkeypatch.setattr(httpx.AsyncClient, "post", forbidden_post)
     provider = DeterministicProvider(
+        "det",
         DeterministicProviderConfig(
-            kind="deterministic",
+            type="deterministic",
             response_text="the configured deterministic response",
-        )
+        ),
     )
-    first_request = _chat_request(runtime_model="one", temperature=0.1, max_tokens=3)
-    second_request = _chat_request(runtime_model="two", temperature=1.9, max_tokens=99)
+    first_request = _chat_request(provider_model="one", temperature=0.1, max_tokens=3)
+    second_request = _chat_request(provider_model="two", temperature=1.9, max_tokens=99)
 
     async def exercise() -> tuple[ProviderChatResult, ProviderChatResult]:
         first = await provider.chat(first_request)

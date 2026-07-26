@@ -12,12 +12,13 @@ from vulcan.registry import ConfiguredModel, ModelRegistry
 
 def _model(
     model_id: str,
-    runtime_name: str,
+    provider_model: str,
     *capabilities: Capability,
 ) -> ModelConfig:
     return ModelConfig(
         id=model_id,
-        runtime_name=runtime_name,
+        provider="test-provider",
+        provider_model=provider_model,
         capabilities=frozenset(capabilities),
         description=f"Description for {model_id}",
     )
@@ -32,10 +33,11 @@ def test_registry_preserves_configuration_order_and_public_runtime_mapping() -> 
 
     assert isinstance(listed, tuple)
     assert [model.id for model in listed] == ["public-chat", "public-embed"]
-    assert [model.runtime_name for model in listed] == [
+    assert [model.provider_model for model in listed] == [
         "private/runtime-chat",
         "private/runtime-embed",
     ]
+    assert all(model.provider_id == "test-provider" for model in listed)
     assert registry.get("public-chat") is listed[0]
     assert registry.get("public-embed") is listed[1]
 

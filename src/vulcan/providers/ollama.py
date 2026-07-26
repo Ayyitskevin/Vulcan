@@ -21,6 +21,7 @@ from vulcan.providers.base import (
     ProviderChatResult,
     ProviderTokenUsage,
 )
+from vulcan.providers.http import build_client
 from vulcan.readiness import RuntimeProbe
 
 
@@ -55,24 +56,24 @@ class _OllamaTagsResponse(BaseModel):
 
 
 class OllamaProvider:
-    kind: Literal["ollama"] = "ollama"
+    provider_type: Literal["ollama"] = "ollama"
 
     def __init__(
         self,
+        provider_id: str,
         config: OllamaProviderConfig,
         *,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._client = client or httpx.AsyncClient(
+        self.provider_id = provider_id
+        self._client = client or build_client(
             base_url=config.base_url,
-            timeout=httpx.Timeout(config.timeout_seconds),
-            follow_redirects=False,
-            trust_env=False,
+            timeout_seconds=config.timeout_seconds,
         )
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
         payload: dict[str, Any] = {
-            "model": request.runtime_model,
+            "model": request.provider_model,
             "messages": [
                 {"role": message.role, "content": message.content} for message in request.messages
             ],

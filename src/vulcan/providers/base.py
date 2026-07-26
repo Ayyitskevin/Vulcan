@@ -7,6 +7,8 @@ from typing import Literal, Protocol
 
 from vulcan.readiness import RuntimeProbe
 
+ProviderType = Literal["ollama", "anthropic", "openai_compatible", "deterministic"]
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderMessage:
@@ -16,7 +18,7 @@ class ProviderMessage:
 
 @dataclass(frozen=True, slots=True)
 class ProviderChatRequest:
-    runtime_model: str
+    provider_model: str
     messages: tuple[ProviderMessage, ...]
     temperature: float | None
     max_tokens: int | None
@@ -37,8 +39,13 @@ class ProviderChatResult:
 
 class Provider(Protocol):
     @property
-    def kind(self) -> Literal["ollama", "deterministic"]:
-        """Stable provider identifier exposed as safe metadata."""
+    def provider_id(self) -> str:
+        """Configured provider instance ID exposed as safe metadata."""
+        ...
+
+    @property
+    def provider_type(self) -> ProviderType:
+        """Stable adapter type exposed as safe metadata."""
         ...
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:

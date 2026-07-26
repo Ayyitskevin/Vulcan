@@ -12,7 +12,8 @@ from vulcan.errors import ModelNotFoundError, UnsupportedCapabilityError
 @dataclass(frozen=True, slots=True)
 class ConfiguredModel:
     id: str
-    runtime_name: str
+    provider_id: str
+    provider_model: str
     capabilities: frozenset[Capability]
     description: str | None
 
@@ -22,7 +23,8 @@ class ModelRegistry:
         entries = tuple(
             ConfiguredModel(
                 id=model.id,
-                runtime_name=model.runtime_name,
+                provider_id=model.provider,
+                provider_model=model.provider_model,
                 capabilities=model.capabilities,
                 description=model.description,
             )

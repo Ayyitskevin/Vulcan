@@ -40,7 +40,8 @@ class ExplosiveValue:
 class SequencedProvider:
     """One success followed by one safely normalized provider failure."""
 
-    kind: Literal["deterministic"] = "deterministic"
+    provider_type: Literal["deterministic"] = "deterministic"
+    provider_id = "test-provider"
 
     def __init__(self) -> None:
         self.calls = 0
@@ -67,15 +68,18 @@ class SequencedProvider:
 
 def _config() -> GatewayConfig:
     return GatewayConfig(
-        schema_version=1,
-        provider=DeterministicProviderConfig(
-            kind="deterministic",
-            response_text="unused configured response",
-        ),
+        schema_version=2,
+        providers={
+            "test-provider": DeterministicProviderConfig(
+                type="deterministic",
+                response_text="unused configured response",
+            )
+        },
         models=(
             ModelConfig(
                 id="safe-public-model",
-                runtime_name="private-runtime-model",
+                provider="test-provider",
+                provider_model="private-runtime-model",
                 capabilities=frozenset({Capability.CHAT}),
             ),
         ),
@@ -224,7 +228,7 @@ def test_api_logs_operational_counts_without_prompt_response_or_cause(
     with TestClient(
         create_app(
             _config(),
-            provider=provider,
+            providers={"test-provider": provider},
             clock=lambda: 100.0,
             id_factory=lambda: "chatcmpl-log-test",
         ),
@@ -263,14 +267,15 @@ def test_api_logs_operational_counts_without_prompt_response_or_cause(
     failed = next(record for record in records if record["event"] == "chat_failed")
     request_records = [record for record in records if record["event"] == "request_complete"]
 
-    assert completed["provider"] == "deterministic"
+    assert completed["provider"] == "test-provider"
+    assert completed["provider_type"] == "deterministic"
     assert completed["model"] == "safe-public-model"
     assert completed["turn_count"] == 1
     assert completed["request_id"] == success.headers["X-Request-ID"]
     assert failed["request_id"] == failure.headers["X-Request-ID"]
     assert completed["input_chars"] == len(PROMPT_SENTINEL)
     assert completed["output_chars"] == len(RESPONSE_SENTINEL)
-    assert failed["provider"] == "deterministic"
+    assert failed["provider"] == "test-provider"
     assert failed["error_code"] == "provider_unavailable"
     assert len(request_records) == 2
     assert {record["request_id"] for record in request_records} == {

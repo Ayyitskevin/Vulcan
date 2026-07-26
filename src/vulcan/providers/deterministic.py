@@ -8,9 +8,10 @@ from vulcan.readiness import RuntimeProbe
 
 
 class DeterministicProvider:
-    kind: Literal["deterministic"] = "deterministic"
+    provider_type: Literal["deterministic"] = "deterministic"
 
-    def __init__(self, config: DeterministicProviderConfig) -> None:
+    def __init__(self, provider_id: str, config: DeterministicProviderConfig) -> None:
+        self.provider_id = provider_id
         self._response_text = config.response_text
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:

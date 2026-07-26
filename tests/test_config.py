@@ -7,13 +7,17 @@ import pytest
 from pydantic import ValidationError
 
 from vulcan.config import (
+    AnthropicProviderConfig,
     ConfigLoadError,
     GatewayConfig,
     OllamaProviderConfig,
+    OpenAICompatibleProviderConfig,
     ReadinessConfig,
     ServerConfig,
     load_config,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _error_types(error: ValidationError) -> set[str]:
@@ -106,7 +110,7 @@ def test_ollama_provider_accepts_only_loopback_urls(
     normalized: str,
 ) -> None:
     provider = OllamaProviderConfig(
-        kind="ollama",
+        type="ollama",
         base_url=configured,
         timeout_seconds=60,
     )
@@ -138,7 +142,7 @@ def test_ollama_provider_accepts_only_loopback_urls(
 def test_ollama_provider_rejects_unsafe_or_ambiguous_urls(base_url: str) -> None:
     with pytest.raises(ValidationError):
         OllamaProviderConfig(
-            kind="ollama",
+            type="ollama",
             base_url=base_url,
             timeout_seconds=60,
         )
@@ -148,7 +152,7 @@ def test_ollama_provider_rejects_unsafe_or_ambiguous_urls(base_url: str) -> None
 def test_ollama_provider_rejects_out_of_range_timeouts(timeout_seconds: float) -> None:
     with pytest.raises(ValidationError):
         OllamaProviderConfig(
-            kind="ollama",
+            type="ollama",
             base_url="http://127.0.0.1:11434",
             timeout_seconds=timeout_seconds,
         )
@@ -156,7 +160,7 @@ def test_ollama_provider_rejects_out_of_range_timeouts(timeout_seconds: float) -
 
 def test_ollama_provider_accepts_integer_timeout_without_boolean_coercion() -> None:
     provider = OllamaProviderConfig(
-        kind="ollama",
+        type="ollama",
         base_url="http://127.0.0.1:11434",
         timeout_seconds=60,
     )
@@ -167,7 +171,7 @@ def test_ollama_provider_accepts_integer_timeout_without_boolean_coercion() -> N
 def test_ollama_provider_rejects_boolean_timeout() -> None:
     with pytest.raises(ValidationError) as raised:
         OllamaProviderConfig(
-            kind="ollama",
+            type="ollama",
             base_url="http://127.0.0.1:11434",
             timeout_seconds=True,
         )
@@ -178,12 +182,136 @@ def test_ollama_provider_rejects_boolean_timeout() -> None:
 def test_ollama_provider_rejects_string_timeout() -> None:
     with pytest.raises(ValidationError) as raised:
         OllamaProviderConfig(
-            kind="ollama",
+            type="ollama",
             base_url="http://127.0.0.1:11434",
             timeout_seconds="60",  # type: ignore[arg-type]
         )
 
     assert "float_type" in _error_types(raised.value)
+
+
+# ── Hosted provider configuration (BYOK) ─────────────────────────────────────
+
+
+def _openai_compatible(**overrides: Any) -> OpenAICompatibleProviderConfig:
+    fields: dict[str, Any] = {
+        "type": "openai_compatible",
+        "base_url": "https://api.example-vendor.com/v1",
+        "api_key_env": "VULCAN_TEST_API_KEY",
+        "timeout_seconds": 30.0,
+    }
+    fields.update(overrides)
+    return OpenAICompatibleProviderConfig(**fields)
+
+
+@pytest.mark.parametrize(
+    ("configured", "normalized"),
+    [
+        ("https://api.example-vendor.com/v1", "https://api.example-vendor.com/v1"),
+        ("https://api.example-vendor.com/v1/", "https://api.example-vendor.com/v1"),
+        (
+            "https://api.example-vendor.com/api/paas/v4",
+            "https://api.example-vendor.com/api/paas/v4",
+        ),
+        ("https://api.example-vendor.com", "https://api.example-vendor.com"),
+        # Cleartext HTTP is loopback-only, for local mocks and proxies.
+        ("http://127.0.0.1:9999/v1", "http://127.0.0.1:9999/v1"),
+        ("http://localhost:9999", "http://localhost:9999"),
+    ],
+)
+def test_hosted_provider_accepts_explicit_https_or_loopback_http(
+    configured: str, normalized: str
+) -> None:
+    assert _openai_compatible(base_url=configured).base_url == normalized
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://api.example-vendor.com/v1",  # cleartext off-loopback
+        "https://user:password@api.example-vendor.com/v1",  # URL credentials
+        "https://api.example-vendor.com/v1?token=x",  # query
+        "https://api.example-vendor.com/v1#frag",  # fragment
+        "https://api.example-vendor.com//v1",  # empty path segment
+        "ftp://api.example-vendor.com/v1",
+        "https:///missing-host",
+        "https://api.example-vendor.com:0/v1",
+        "https://api.example-vendor.com:99999/v1",
+    ],
+)
+def test_hosted_provider_rejects_unsafe_urls(base_url: str) -> None:
+    with pytest.raises(ValidationError):
+        _openai_compatible(base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "api_key_env",
+    [
+        "lowercase_key",
+        "1LEADING_DIGIT",
+        "_LEADING_UNDERSCORE",
+        "WITH-HYPHEN",
+        "WITH SPACE",
+        "WITH.DOT",
+        "",
+        "$INJECTION",
+    ],
+)
+def test_hosted_provider_rejects_malformed_env_var_names(api_key_env: str) -> None:
+    with pytest.raises(ValidationError):
+        _openai_compatible(api_key_env=api_key_env)
+
+
+def test_hosted_provider_requires_api_key_env_and_never_accepts_inline_keys() -> None:
+    with pytest.raises(ValidationError) as missing:
+        OpenAICompatibleProviderConfig(
+            type="openai_compatible",
+            base_url="https://api.example-vendor.com/v1",
+            timeout_seconds=30.0,
+        )
+    assert "missing" in _error_types(missing.value)
+
+    with pytest.raises(ValidationError) as inline:
+        _openai_compatible(api_key="sk-raw-secret-must-not-be-supported")
+    assert "extra_forbidden" in _error_types(inline.value)
+
+
+def test_openai_compatible_max_tokens_field_is_constrained() -> None:
+    assert _openai_compatible().max_tokens_field == "max_tokens"
+    assert (
+        _openai_compatible(max_tokens_field="max_completion_tokens").max_tokens_field
+        == "max_completion_tokens"
+    )
+    with pytest.raises(ValidationError):
+        _openai_compatible(max_tokens_field="tokens_limit")
+
+
+def test_anthropic_provider_defaults_and_bounds() -> None:
+    provider = AnthropicProviderConfig(
+        type="anthropic",
+        api_key_env="VULCAN_ANTHROPIC_API_KEY",
+        timeout_seconds=30.0,
+    )
+    assert provider.base_url == "https://api.anthropic.com"
+    assert provider.default_max_tokens == 4096
+
+    with pytest.raises(ValidationError):
+        AnthropicProviderConfig(
+            type="anthropic",
+            api_key_env="VULCAN_ANTHROPIC_API_KEY",
+            timeout_seconds=30.0,
+            default_max_tokens=0,
+        )
+    with pytest.raises(ValidationError):
+        AnthropicProviderConfig(
+            type="anthropic",
+            api_key_env="VULCAN_ANTHROPIC_API_KEY",
+            timeout_seconds=30.0,
+            default_max_tokens=32769,
+        )
+
+
+# ── Whole-document validation ────────────────────────────────────────────────
 
 
 def test_load_config_reports_missing_file_without_path_echo(tmp_path: Path) -> None:
@@ -200,7 +328,7 @@ def test_load_config_reports_missing_file_without_path_echo(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "content",
     [
-        b"[provider\nkind = 'ollama'",
+        b"[providers.p\ntype = 'ollama'",
         b"\xff\xfe\x00",
     ],
 )
@@ -223,16 +351,17 @@ def test_load_config_rejects_unknown_fields_without_value_echo(tmp_path: Path) -
     path = tmp_path / "vulcan.toml"
     path.write_text(
         f"""
-schema_version = 1
+schema_version = 2
 undocumented = "{sentinel}"
 
-[provider]
-kind = "deterministic"
+[providers.det]
+type = "deterministic"
 response_text = "safe-response"
 
 [[models]]
 id = "chat-model"
-runtime_name = "runtime-model"
+provider = "det"
+provider_model = "runtime-model"
 capabilities = ["chat"]
 """.strip(),
         encoding="utf-8",
@@ -252,7 +381,89 @@ capabilities = ["chat"]
     assert sentinel not in public_error
 
 
-@pytest.mark.parametrize("missing_field", ["schema_version", "provider", "models"])
+def test_load_config_parses_the_shipped_multi_provider_example() -> None:
+    config = load_config(REPO_ROOT / "config" / "vulcan.example.toml")
+
+    assert config.schema_version == 2
+    assert {provider.type for provider in config.providers.values()} == {
+        "ollama",
+        "anthropic",
+        "openai_compatible",
+    }
+    # Every alias resolves to a configured provider, and no secrets are inline.
+    for model in config.models:
+        assert model.provider in config.providers
+    for provider in config.providers.values():
+        api_key_env = getattr(provider, "api_key_env", None)
+        if api_key_env is not None:
+            assert api_key_env.startswith("VULCAN_")
+
+
+def test_load_config_parses_the_shipped_deterministic_example() -> None:
+    config = load_config(REPO_ROOT / "config" / "vulcan.deterministic.toml")
+
+    assert config.schema_version == 2
+    assert list(config.providers) == ["deterministic"]
+
+
+# ── v1 migration rejection ───────────────────────────────────────────────────
+
+
+def test_load_config_rejects_schema_v1_with_migration_guidance(tmp_path: Path) -> None:
+    path = tmp_path / "vulcan.toml"
+    path.write_text(
+        """
+schema_version = 1
+
+[provider]
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+timeout_seconds = 60.0
+
+[[models]]
+id = "local-chat"
+runtime_name = "some-model"
+capabilities = ["chat"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError) as raised:
+        load_config(path)
+
+    reason = raised.value.reason
+    assert "schema_version 1" in reason
+    assert "schema_version 2" in reason
+    assert "provider_model" in reason
+    assert raised.value.issues == ()
+
+
+def test_load_config_recognizes_legacy_provider_table_without_version(tmp_path: Path) -> None:
+    path = tmp_path / "vulcan.toml"
+    path.write_text(
+        """
+schema_version = 2
+
+[provider]
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+timeout_seconds = 60.0
+
+[[models]]
+id = "local-chat"
+runtime_name = "some-model"
+capabilities = ["chat"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError) as raised:
+        load_config(path)
+
+    assert "schema_version 2" in raised.value.reason
+
+
+@pytest.mark.parametrize("missing_field", ["schema_version", "providers", "models"])
 def test_gateway_config_rejects_missing_required_sections(
     valid_config_document: dict[str, Any],
     missing_field: str,
@@ -268,10 +479,10 @@ def test_gateway_config_rejects_missing_required_sections(
     )
 
 
-def test_gateway_config_rejects_unknown_provider_kind(
+def test_gateway_config_rejects_unknown_provider_type(
     valid_config_document: dict[str, Any],
 ) -> None:
-    valid_config_document["provider"]["kind"] = "automatic-cloud-fallback"
+    valid_config_document["providers"]["det"]["type"] = "automatic-cloud-fallback"
 
     with pytest.raises(ValidationError) as raised:
         GatewayConfig.model_validate(valid_config_document)
@@ -282,7 +493,7 @@ def test_gateway_config_rejects_unknown_provider_kind(
 def test_gateway_config_rejects_unknown_nested_fields(
     valid_config_document: dict[str, Any],
 ) -> None:
-    valid_config_document["provider"]["api_key"] = "must-not-be-supported"
+    valid_config_document["providers"]["det"]["api_key"] = "must-not-be-supported"
 
     with pytest.raises(ValidationError) as raised:
         GatewayConfig.model_validate(valid_config_document)
@@ -290,10 +501,89 @@ def test_gateway_config_rejects_unknown_nested_fields(
     assert "extra_forbidden" in _error_types(raised.value)
 
 
+@pytest.mark.parametrize(
+    "provider_id",
+    ["UPPER", "has space", "has/slash", "-leading-hyphen", "_leading_underscore", "é"],
+)
+def test_gateway_config_rejects_malformed_provider_ids(
+    valid_config_document: dict[str, Any],
+    provider_id: str,
+) -> None:
+    valid_config_document["providers"][provider_id] = {
+        "type": "deterministic",
+        "response_text": "x",
+    }
+
+    with pytest.raises(ValidationError) as raised:
+        GatewayConfig.model_validate(valid_config_document)
+
+    assert "invalid_provider_id" in _error_types(raised.value)
+
+
+def test_gateway_config_rejects_model_referencing_unknown_provider(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["models"][0]["provider"] = "not-configured"
+
+    with pytest.raises(ValidationError) as raised:
+        GatewayConfig.model_validate(valid_config_document)
+
+    assert "unknown_provider_reference" in _error_types(raised.value)
+
+
+def test_gateway_config_rejects_empty_provider_table(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["providers"] = {}
+
+    with pytest.raises(ValidationError) as raised:
+        GatewayConfig.model_validate(valid_config_document)
+
+    assert "too_short" in _error_types(raised.value)
+
+
+def test_gateway_config_accepts_multiple_named_providers(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["providers"]["openai"] = {
+        "type": "openai_compatible",
+        "base_url": "https://api.example-vendor.com/v1",
+        "api_key_env": "VULCAN_TEST_API_KEY",
+        "timeout_seconds": 30.0,
+    }
+    valid_config_document["providers"]["anthropic"] = {
+        "type": "anthropic",
+        "api_key_env": "VULCAN_ANTHROPIC_API_KEY",
+        "timeout_seconds": 30.0,
+    }
+    valid_config_document["models"].append(
+        {
+            "id": "cloud-model",
+            "provider": "openai",
+            "provider_model": "vendor-native-name",
+            "capabilities": ["chat"],
+        }
+    )
+
+    config = GatewayConfig.model_validate(valid_config_document)
+
+    assert set(config.providers) == {"det", "openai", "anthropic"}
+    assert config.models[1].provider == "openai"
+
+
 def test_gateway_config_rejects_unknown_schema_version(
     valid_config_document: dict[str, Any],
 ) -> None:
-    valid_config_document["schema_version"] = 2
+    valid_config_document["schema_version"] = 3
+
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(valid_config_document)
+
+
+def test_gateway_config_rejects_schema_version_one(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["schema_version"] = 1
 
     with pytest.raises(ValidationError):
         GatewayConfig.model_validate(valid_config_document)
@@ -310,7 +600,7 @@ def test_gateway_config_rejects_boolean_schema_version(
     assert "boolean_not_allowed" in _error_types(raised.value)
 
 
-@pytest.mark.parametrize("schema_version", [1.0, "1"])
+@pytest.mark.parametrize("schema_version", [2.0, "2"])
 def test_gateway_config_rejects_non_integer_schema_version(
     valid_config_document: dict[str, Any],
     schema_version: object,
@@ -327,7 +617,7 @@ def test_gateway_config_rejects_duplicate_public_model_ids(
     valid_config_document: dict[str, Any],
 ) -> None:
     duplicate = dict(valid_config_document["models"][0])
-    duplicate["runtime_name"] = "another-runtime-model"
+    duplicate["provider_model"] = "another-runtime-model"
     valid_config_document["models"].append(duplicate)
 
     with pytest.raises(ValidationError) as raised:
