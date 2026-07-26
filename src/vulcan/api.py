@@ -33,6 +33,8 @@ from vulcan.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     DiscoveryMetadata,
+    EmbeddingsRequest,
+    EmbeddingsResponse,
     ErrorBody,
     ErrorEnvelope,
     HealthResponse,
@@ -421,5 +423,13 @@ def create_app(
         if payload.stream:
             return await _stream_response(payload, request)
         return await gateway.chat(payload, request_id=_request_id(request))
+
+    @app.post(
+        "/v1/embeddings",
+        response_model=EmbeddingsResponse,
+        responses=ERROR_RESPONSES,
+    )
+    async def embeddings(payload: EmbeddingsRequest, request: Request) -> EmbeddingsResponse:
+        return await gateway.embed(payload, request_id=_request_id(request))
 
     return app

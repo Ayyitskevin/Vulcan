@@ -29,6 +29,8 @@ _SAFE_EVENTS = frozenset(
     {
         "chat_completed",
         "chat_failed",
+        "embeddings_completed",
+        "embeddings_failed",
         "internal_error",
         "provider_failed",
         "readiness_probed",

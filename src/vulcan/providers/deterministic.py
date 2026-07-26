@@ -7,11 +7,16 @@ from vulcan.config import DeterministicProviderConfig
 from vulcan.providers.base import (
     ProviderChatRequest,
     ProviderChatResult,
+    ProviderEmbeddingRequest,
+    ProviderEmbeddingResult,
     ProviderStreamEvent,
     StreamDelta,
     StreamEnd,
 )
 from vulcan.readiness import RuntimeProbe
+
+# A fixed, obviously synthetic unit vector: this adapter performs no inference.
+DETERMINISTIC_EMBEDDING = (0.125,) * 8
 
 
 class DeterministicProvider:
@@ -29,6 +34,12 @@ class DeterministicProvider:
         del request
         yield StreamDelta(text=self._response_text)
         yield StreamEnd(finish_reason="stop", usage=None)
+
+    async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:
+        return ProviderEmbeddingResult(
+            vectors=tuple(DETERMINISTIC_EMBEDDING for _ in request.inputs),
+            usage=None,
+        )
 
     async def discover_runtime(self) -> RuntimeProbe:
         # In-process and non-network: known ready, but there is no external
