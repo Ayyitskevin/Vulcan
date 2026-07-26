@@ -15,20 +15,23 @@ def valid_config_document() -> dict[str, Any]:
     """Return a fresh, fully explicit configuration document for each test."""
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "server": {
             "host": "127.0.0.1",
             "port": 8140,
             "log_level": "INFO",
         },
-        "provider": {
-            "kind": "deterministic",
-            "response_text": "deterministic-test-response",
+        "providers": {
+            "det": {
+                "type": "deterministic",
+                "response_text": "deterministic-test-response",
+            }
         },
         "models": [
             {
                 "id": "chat-model",
-                "runtime_name": "runtime/chat-model",
+                "provider": "det",
+                "provider_model": "runtime/chat-model",
                 "capabilities": ["chat"],
                 "description": "Test-only chat model",
             }

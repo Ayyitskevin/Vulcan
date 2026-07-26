@@ -19,9 +19,12 @@ from vulcan.config import (
 )
 from vulcan.errors import (
     ConfigurationError,
+    MissingCredentialError,
     ModelUnavailableError,
+    ProviderAuthError,
     ProviderError,
     ProviderProtocolError,
+    ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderUnavailableError,
     VulcanError,
@@ -48,14 +51,16 @@ class ResponseLike(Protocol):
 class RecordingProvider:
     """No-I/O provider used to prove validation happens before provider invocation."""
 
-    kind: Literal["deterministic"] = "deterministic"
+    provider_type: Literal["deterministic"] = "deterministic"
 
     def __init__(
         self,
         *,
+        provider_id: str = "test-provider",
         result: ProviderChatResult | None = None,
         failure: Exception | None = None,
     ) -> None:
+        self.provider_id = provider_id
         self.result = result or ProviderChatResult(content=REPLY_SENTINEL, finish_reason="stop")
         self.failure = failure
         self.calls: list[ProviderChatRequest] = []
@@ -80,21 +85,25 @@ class RecordingProvider:
 
 def _config(*, response_text: str = REPLY_SENTINEL) -> GatewayConfig:
     return GatewayConfig(
-        schema_version=1,
-        provider=DeterministicProviderConfig(
-            kind="deterministic",
-            response_text=response_text,
-        ),
+        schema_version=2,
+        providers={
+            "test-provider": DeterministicProviderConfig(
+                type="deterministic",
+                response_text=response_text,
+            )
+        },
         models=(
             ModelConfig(
                 id="public-chat",
-                runtime_name=RUNTIME_SENTINEL,
+                provider="test-provider",
+                provider_model=RUNTIME_SENTINEL,
                 capabilities=frozenset({Capability.CHAT}),
                 description="Configured chat model",
             ),
             ModelConfig(
                 id="public-embed",
-                runtime_name="private-embedding-runtime",
+                provider="test-provider",
+                provider_model="private-embedding-runtime",
                 capabilities=frozenset({Capability.EMBEDDINGS}),
                 description=None,
             ),
@@ -154,7 +163,7 @@ def _expected_error(
     }
 
 
-def test_healthz_reports_liveness_and_deterministic_provider_readiness() -> None:
+def test_healthz_reports_liveness_and_per_provider_readiness() -> None:
     with _client(create_app(_config())) as client:
         response = client.get("/healthz")
 
@@ -163,7 +172,9 @@ def test_healthz_reports_liveness_and_deterministic_provider_readiness() -> None
         "status": "ok",
         "service": "vulcan",
         "api_version": "v1",
-        "provider": {"kind": "deterministic", "availability": "available"},
+        "providers": [
+            {"id": "test-provider", "type": "deterministic", "availability": "available"}
+        ],
         "models_configured": 2,
     }
     _assert_request_id(response)
@@ -176,16 +187,13 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
     assert response.status_code == 200
     assert response.json() == {
         "object": "list",
-        "discovery": {
-            "source": "configuration",
-            "live": False,
-            "availability": "available",
-        },
+        "discovery": {"source": "configuration"},
         "data": [
             {
                 "id": "public-chat",
                 "object": "model",
-                "provider": "deterministic",
+                "provider": "test-provider",
+                "provider_type": "deterministic",
                 "capabilities": ["chat"],
                 "availability": "available",
                 "description": "Configured chat model",
@@ -193,7 +201,8 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
             {
                 "id": "public-embed",
                 "object": "model",
-                "provider": "deterministic",
+                "provider": "test-provider",
+                "provider_type": "deterministic",
                 "capabilities": ["embeddings"],
                 "availability": "available",
                 "description": None,
@@ -238,7 +247,7 @@ def test_deterministic_chat_response_is_stable_and_explicit() -> None:
         "object": "chat.completion",
         "created": 1_784_550_000,
         "model": "public-chat",
-        "provider": "deterministic",
+        "provider": "test-provider",
         "choices": [
             {
                 "index": 0,
@@ -251,7 +260,7 @@ def test_deterministic_chat_response_is_stable_and_explicit() -> None:
     _assert_request_id(response)
 
 
-def test_chat_maps_public_model_to_runtime_name_and_preserves_provider_usage() -> None:
+def test_chat_maps_public_model_to_provider_model_and_preserves_provider_usage() -> None:
     provider = RecordingProvider(
         result=ProviderChatResult(
             content="mapped reply",
@@ -261,7 +270,7 @@ def test_chat_maps_public_model_to_runtime_name_and_preserves_provider_usage() -
     )
     app = create_app(
         _config(),
-        provider=provider,
+        providers={"test-provider": provider},
         clock=lambda: 123.0,
         id_factory=lambda: "chatcmpl-mapped",
     )
@@ -281,7 +290,7 @@ def test_chat_maps_public_model_to_runtime_name_and_preserves_provider_usage() -
     assert response.status_code == 200
     assert provider.calls == [
         ProviderChatRequest(
-            runtime_model=RUNTIME_SENTINEL,
+            provider_model=RUNTIME_SENTINEL,
             messages=(
                 # These are provider-bound values, not public discovery values.
                 ProviderMessage(role="system", content="Stay concise."),
@@ -331,7 +340,8 @@ def test_get_model_returns_configured_model_with_readiness() -> None:
     body = response.json()
     assert body["id"] == "public-chat"
     assert body["object"] == "model"
-    assert body["provider"] == "deterministic"
+    assert body["provider"] == "test-provider"
+    assert body["provider_type"] == "deterministic"
     assert body["capabilities"] == ["chat"]
     assert body["availability"] == "available"
     assert RUNTIME_SENTINEL not in response.text
@@ -400,7 +410,7 @@ def test_loopback_host_headers_are_accepted(host: str) -> None:
 )
 def test_non_loopback_or_ambiguous_host_headers_are_rejected(host: str) -> None:
     provider = RecordingProvider()
-    with _client(create_app(_config(), provider=provider)) as client:
+    with _client(create_app(_config(), providers={"test-provider": provider})) as client:
         response = client.post(
             "/v1/chat/completions",
             json=_valid_chat(),
@@ -440,7 +450,7 @@ def test_request_validation_uses_a_sanitized_stable_envelope() -> None:
 
 def test_unknown_model_is_normalized_before_provider_invocation() -> None:
     provider = RecordingProvider()
-    with _client(create_app(_config(), provider=provider)) as client:
+    with _client(create_app(_config(), providers={"test-provider": provider})) as client:
         response = client.post(
             "/v1/chat/completions",
             json=_valid_chat(model="missing-model"),
@@ -472,7 +482,7 @@ def test_unsupported_capability_is_normalized_before_provider_invocation(
     capability: str,
 ) -> None:
     provider = RecordingProvider()
-    with _client(create_app(_config(), provider=provider)) as client:
+    with _client(create_app(_config(), providers={"test-provider": provider})) as client:
         response = client.post(
             "/v1/chat/completions",
             json=_valid_chat(model=model, stream=stream),
@@ -492,54 +502,87 @@ def test_unsupported_capability_is_normalized_before_provider_invocation(
 
 
 @pytest.mark.parametrize(
-    ("failure", "status", "code", "message", "retryable"),
+    ("failure", "status", "code", "message", "retryable", "details"),
     [
         pytest.param(
             ProviderUnavailableError(),
             503,
             "provider_unavailable",
-            "The configured local provider is unavailable.",
+            "The selected provider is unavailable.",
             True,
+            {"provider": "test-provider"},
             id="provider-unavailable",
         ),
         pytest.param(
             ModelUnavailableError(),
             503,
             "model_unavailable",
-            "The configured model is unavailable in the local provider.",
+            "The configured model is unavailable in the selected provider.",
             False,
+            {"provider": "test-provider"},
             id="model-unavailable",
+        ),
+        pytest.param(
+            MissingCredentialError("VULCAN_TEST_API_KEY"),
+            503,
+            "missing_credential",
+            "The selected provider's credential environment variable is not usable.",
+            False,
+            {"api_key_env": "VULCAN_TEST_API_KEY", "provider": "test-provider"},
+            id="missing-credential",
+        ),
+        pytest.param(
+            ProviderAuthError(),
+            502,
+            "provider_auth_failed",
+            "The selected provider rejected the configured credential.",
+            False,
+            {"provider": "test-provider"},
+            id="provider-auth-failed",
+        ),
+        pytest.param(
+            ProviderRateLimitError(),
+            429,
+            "provider_rate_limited",
+            "The selected provider rate limited this request.",
+            True,
+            {"provider": "test-provider"},
+            id="provider-rate-limited",
         ),
         pytest.param(
             ProviderTimeoutError(),
             504,
             "provider_timeout",
-            "The configured local provider timed out.",
+            "The selected provider timed out.",
             True,
+            {"provider": "test-provider"},
             id="provider-timeout",
         ),
         pytest.param(
             ProviderError(),
             502,
             "provider_error",
-            "The configured local provider rejected or failed the request.",
+            "The selected provider rejected or failed the request.",
             True,
+            {"provider": "test-provider"},
             id="provider-error",
         ),
         pytest.param(
             ProviderError(retryable=False),
             502,
             "provider_error",
-            "The configured local provider rejected or failed the request.",
+            "The selected provider rejected or failed the request.",
             False,
+            {"provider": "test-provider"},
             id="provider-rejection",
         ),
         pytest.param(
             ProviderProtocolError(),
             502,
             "provider_protocol_error",
-            "The configured local provider returned an invalid response.",
+            "The selected provider returned an invalid response.",
             False,
+            {"provider": "test-provider"},
             id="provider-protocol",
         ),
         pytest.param(
@@ -548,6 +591,7 @@ def test_unsupported_capability_is_normalized_before_provider_invocation(
             "configuration_error",
             "Vulcan is not configured to complete this request.",
             False,
+            {"provider": "test-provider"},
             id="provider-misconfigured",
         ),
     ],
@@ -558,9 +602,10 @@ def test_provider_failures_share_one_normalized_error_contract(
     code: str,
     message: str,
     retryable: bool,
+    details: dict[str, str | int | bool],
 ) -> None:
     provider = RecordingProvider(failure=failure)
-    with _client(create_app(_config(), provider=provider)) as client:
+    with _client(create_app(_config(), providers={"test-provider": provider})) as client:
         response = client.post("/v1/chat/completions", json=_valid_chat())
 
     assert response.status_code == status
@@ -570,6 +615,7 @@ def test_provider_failures_share_one_normalized_error_contract(
         code=code,
         message=message,
         retryable=retryable,
+        details=details,
     )
     assert len(provider.calls) == 1
     assert PROMPT_SENTINEL not in response.text
@@ -595,7 +641,7 @@ def test_unexpected_provider_failure_is_sanitized_at_the_http_boundary(
     exception_sentinel = "unexpected-provider-detail-must-not-escape"
     provider = RecordingProvider(failure=RuntimeError(exception_sentinel))
     with _client(
-        create_app(_config(), provider=provider),
+        create_app(_config(), providers={"test-provider": provider}),
         raise_server_exceptions=False,
     ) as client:
         response = client.post("/v1/chat/completions", json=_valid_chat())
@@ -612,3 +658,12 @@ def test_unexpected_provider_failure_is_sanitized_at_the_http_boundary(
     assert PROMPT_SENTINEL not in response.text
     assert exception_sentinel not in caplog.text
     assert PROMPT_SENTINEL not in caplog.text
+    # The safe diagnostic survives: the class name is logged (under a key the
+    # formatter does not reserve or redact), never the exception message.
+    internal_records = [record for record in caplog.records if record.msg == "internal_error"]
+    assert internal_records
+    metadata = internal_records[0].metadata  # type: ignore[attr-defined]
+    assert metadata["exception_type"] == "RuntimeError"
+    from vulcan.observability import redact_metadata
+
+    assert redact_metadata(metadata)["exception_type"] == "RuntimeError"

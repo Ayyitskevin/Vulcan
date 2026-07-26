@@ -39,18 +39,48 @@ class UnsupportedCapabilityError(VulcanError):
         super().__init__(details=details)
 
 
+class MissingCredentialError(VulcanError):
+    """The provider's api_key_env variable is unset, empty, or unusable.
+
+    Only the environment-variable *name* (safe configuration metadata) is ever
+    attached; the value is never read into an error or log.
+    """
+
+    code = "missing_credential"
+    status_code = 503
+    retryable = False
+    message = "The selected provider's credential environment variable is not usable."
+
+    def __init__(self, api_key_env: str) -> None:
+        super().__init__(details={"api_key_env": api_key_env})
+
+
+class ProviderAuthError(VulcanError):
+    code = "provider_auth_failed"
+    status_code = 502
+    retryable = False
+    message = "The selected provider rejected the configured credential."
+
+
+class ProviderRateLimitError(VulcanError):
+    code = "provider_rate_limited"
+    status_code = 429
+    retryable = True
+    message = "The selected provider rate limited this request."
+
+
 class ProviderUnavailableError(VulcanError):
     code = "provider_unavailable"
     status_code = 503
     retryable = True
-    message = "The configured local provider is unavailable."
+    message = "The selected provider is unavailable."
 
 
 class ModelUnavailableError(VulcanError):
     code = "model_unavailable"
     status_code = 503
     retryable = False
-    message = "The configured model is unavailable in the local provider."
+    message = "The configured model is unavailable in the selected provider."
 
     def __init__(self, model_id: str | None = None) -> None:
         super().__init__(details={"model": model_id} if model_id is not None else None)
@@ -60,14 +90,14 @@ class ProviderTimeoutError(VulcanError):
     code = "provider_timeout"
     status_code = 504
     retryable = True
-    message = "The configured local provider timed out."
+    message = "The selected provider timed out."
 
 
 class ProviderError(VulcanError):
     code = "provider_error"
     status_code = 502
     retryable = True
-    message = "The configured local provider rejected or failed the request."
+    message = "The selected provider rejected or failed the request."
 
     def __init__(self, *, retryable: bool = True) -> None:
         super().__init__()
@@ -78,7 +108,7 @@ class ProviderProtocolError(VulcanError):
     code = "provider_protocol_error"
     status_code = 502
     retryable = False
-    message = "The configured local provider returned an invalid response."
+    message = "The selected provider returned an invalid response."
 
 
 class ConfigurationError(VulcanError):

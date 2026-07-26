@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
@@ -22,7 +22,7 @@ from vulcan.config import GatewayConfig
 from vulcan.errors import VulcanError
 from vulcan.gateway import Gateway
 from vulcan.providers.base import Provider
-from vulcan.providers.factory import build_provider
+from vulcan.providers.factory import build_providers
 from vulcan.registry import ModelRegistry
 from vulcan.schemas import (
     Availability,
@@ -36,7 +36,7 @@ from vulcan.schemas import (
     HealthResponse,
     ModelListResponse,
     ModelRecord,
-    ProviderHealth,
+    ProviderStatus,
     ValidationIssue,
 )
 
@@ -46,6 +46,7 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorEnvelope},
     404: {"model": ErrorEnvelope},
     422: {"model": ErrorEnvelope},
+    429: {"model": ErrorEnvelope},
     500: {"model": ErrorEnvelope},
     502: {"model": ErrorEnvelope},
     503: {"model": ErrorEnvelope},
@@ -134,29 +135,33 @@ def _json_error(
 def create_app(
     config: GatewayConfig,
     *,
-    provider: Provider | None = None,
+    providers: Mapping[str, Provider] | None = None,
     clock: Callable[[], float] = time.time,
     id_factory: Callable[[], str] | None = None,
 ) -> FastAPI:
     registry = ModelRegistry(config.models)
-    selected_provider = provider or build_provider(config.provider)
+    selected_providers: dict[str, Provider] = dict(providers or build_providers(config))
     gateway_kwargs: dict[str, Any] = {
         "clock": clock,
         "readiness_ttl_seconds": config.readiness.probe_ttl_seconds,
     }
     if id_factory is not None:
         gateway_kwargs["id_factory"] = id_factory
-    gateway = Gateway(registry, selected_provider, **gateway_kwargs)
+    gateway = Gateway(registry, selected_providers, **gateway_kwargs)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
-        await selected_provider.aclose()
+        for provider in selected_providers.values():
+            await provider.aclose()
 
     app = FastAPI(
         title="Vulcan Local Inference Gateway",
         version=__version__,
-        description="A local-only, configuration-driven subset of the OpenAI chat contract.",
+        description=(
+            "A local-first, single-user gateway exposing a configuration-driven subset "
+            "of the OpenAI chat contract over explicitly configured local and BYOK models."
+        ),
         license_info={"name": "AGPL-3.0-only"},
         lifespan=lifespan,
         docs_url=None,
@@ -249,6 +254,8 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        # "exception_type" (not "exception_class") because the formatter owns
+        # the reserved exception_class slot and would silently drop this key.
         logger.error(
             "internal_error",
             extra={
@@ -256,7 +263,7 @@ def create_app(
                     "request_id": _request_id(request),
                     "method": request.method,
                     "route": _route_name(request),
-                    "exception_class": type(exc).__name__,
+                    "exception_type": type(exc).__name__,
                 }
             },
         )
@@ -279,18 +286,24 @@ def create_app(
         # refresh=true forces a new probe (bypasses the short TTL reuse bound).
         readiness = await gateway.readiness(force=refresh)
         return HealthResponse(
-            provider=ProviderHealth(
-                kind=selected_provider.kind,
-                availability=readiness.provider_availability,
+            providers=tuple(
+                ProviderStatus(
+                    id=item.provider_id,
+                    type=item.provider_type,
+                    availability=item.availability,
+                )
+                for item in readiness.providers
             ),
             models_configured=len(registry.list()),
         )
 
     def _model_record(model_id: str, availability: Availability) -> ModelRecord:
         model = registry.get(model_id)
+        provider = selected_providers[model.provider_id]
         return ModelRecord(
             id=model.id,
-            provider=selected_provider.kind,
+            provider=provider.provider_id,
+            provider_type=provider.provider_type,
             capabilities=tuple(sorted(model.capabilities, key=str)),
             availability=availability,
             description=model.description,
@@ -300,14 +313,12 @@ def create_app(
     async def list_models(refresh: bool = False) -> ModelListResponse:
         # refresh=true forces a new probe (bypasses the short TTL reuse bound).
         readiness = await gateway.readiness(force=refresh)
-        by_id = {item.model_id: item.availability for item in readiness.models}
         return ModelListResponse(
-            discovery=DiscoveryMetadata(
-                source=readiness.source,
-                live=readiness.live,
-                availability=readiness.availability,
+            discovery=DiscoveryMetadata(),
+            data=tuple(
+                _model_record(model.id, readiness.model_availability(model.id))
+                for model in registry.list()
             ),
-            data=tuple(_model_record(model.id, by_id[model.id]) for model in registry.list()),
         )
 
     @app.get(
@@ -321,8 +332,7 @@ def create_app(
         # Raise the stable model_not_found envelope for unknown public IDs.
         registry.get(model_id)
         readiness = await gateway.readiness(force=refresh)
-        by_id = {item.model_id: item.availability for item in readiness.models}
-        return _model_record(model_id, by_id[model_id])
+        return _model_record(model_id, readiness.model_availability(model_id))
 
     @app.get(
         "/v1/capabilities",

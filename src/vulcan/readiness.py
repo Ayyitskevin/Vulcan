@@ -1,8 +1,11 @@
 """Honest readiness/discovery reconciliation for configured public models.
 
 The registry remains the only source of model *identity*. Live runtime probes
-only annotate whether a configured runtime_name is present. Vulcan never invents
-public IDs from the runtime list and never claims "available" when a probe fails.
+only annotate whether a configured provider_model is present. Vulcan never
+invents public IDs from a runtime list and never claims "available" when a
+probe fails. Hosted providers are never probed (that would call authenticated,
+often billable endpoints just to render metadata) and stay "unchecked" until a
+real request uses them.
 
 Probe results may be reused for a short, explicit TTL (see
 ``READINESS_PROBE_TTL_SECONDS``) so health/models/chat share one inventory
@@ -11,6 +14,7 @@ without unbounded stale "available" memory.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -37,22 +41,38 @@ class RuntimeProbe:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderReadiness:
+    """One configured provider instance's probe outcome as safe metadata."""
+
+    provider_id: str
+    provider_type: str
+    live: bool
+    availability: Availability
+
+
+@dataclass(frozen=True, slots=True)
 class ModelReadiness:
     model_id: str
     availability: Availability
 
 
 @dataclass(frozen=True, slots=True)
-class DiscoveryReadiness:
+class GatewayReadiness:
+    """Aggregate readiness across every configured provider and model."""
+
     source: Literal["configuration"]
-    live: bool
-    availability: Availability
-    provider_availability: Availability
+    providers: tuple[ProviderReadiness, ...]
     models: tuple[ModelReadiness, ...]
+
+    def model_availability(self, model_id: str) -> Availability:
+        for item in self.models:
+            if item.model_id == model_id:
+                return item.availability
+        return "unchecked"
 
 
 def runtime_name_matches(configured_runtime: str, live_names: frozenset[str]) -> bool:
-    """Whether a configured provider runtime name is present in a live inventory.
+    """Whether a configured provider model name is present in a live inventory.
 
     Matching rule (conservative — never invents public IDs):
     1. Exact equality with a live name, or
@@ -77,64 +97,51 @@ def runtime_name_matches(configured_runtime: str, live_names: frozenset[str]) ->
     return len(tagged) == 1
 
 
-def reconcile_configured_models(
-    configured: tuple[ConfiguredModel, ...],
-    probe: RuntimeProbe,
-) -> DiscoveryReadiness:
-    """Map configured models onto a probe without inventing IDs or loaded state.
+def _model_availability(model: ConfiguredModel, probe: RuntimeProbe) -> Availability:
+    """One model's annotation from its own provider's probe.
 
-    Rules:
-    - Configured public IDs are the only models returned.
-    - Successful live list → each model is available iff ``runtime_name_matches``
-      its runtime_name against the live set; discovery.live is True.
-    - Failed / incomplete probe → models stay unchecked (never fake available).
-    - A non-live provider that is still known ready (deterministic) may mark
-      models available without claiming a live runtime inventory.
+    Rules (unchanged from v1, applied per provider):
+    - Successful live list → available iff ``runtime_name_matches`` the
+      configured provider_model; otherwise unavailable.
+    - Non-live but known-ready provider (deterministic) → available.
+    - Failed, incomplete, or deliberately skipped probe → unchecked.
     """
 
     if probe.live and probe.runtime_names is not None:
-        names = probe.runtime_names
-        models = tuple(
-            ModelReadiness(
-                model_id=model.id,
-                availability=(
-                    "available"
-                    if runtime_name_matches(model.runtime_name, names)
-                    else "unavailable"
-                ),
-            )
-            for model in configured
-        )
-        return DiscoveryReadiness(
-            source="configuration",
-            live=True,
+        if runtime_name_matches(model.provider_model, probe.runtime_names):
+            return "available"
+        return "unavailable"
+    if probe.provider_availability == "available":
+        return "available"
+    return "unchecked"
+
+
+def reconcile_configured_models(
+    configured: tuple[ConfiguredModel, ...],
+    probes: Mapping[str, RuntimeProbe],
+    provider_types: Mapping[str, str],
+) -> GatewayReadiness:
+    """Map configured models onto per-provider probes without inventing state.
+
+    ``probes`` and ``provider_types`` are keyed by configured provider ID and
+    must cover every provider referenced by ``configured`` (guaranteed by
+    config validation).
+    """
+
+    providers = tuple(
+        ProviderReadiness(
+            provider_id=provider_id,
+            provider_type=provider_types[provider_id],
+            live=probe.live,
             availability=probe.provider_availability,
-            provider_availability=probe.provider_availability,
-            models=models,
         )
-
-    # No successful live inventory. Deterministic (available, non-live) is known
-    # ready in-process; transport/protocol failures stay fail-loud as unchecked
-    # or unavailable at the provider layer and unchecked per model.
-    if probe.provider_availability == "available" and not probe.live:
-        models = tuple(
-            ModelReadiness(model_id=model.id, availability="available") for model in configured
-        )
-        return DiscoveryReadiness(
-            source="configuration",
-            live=False,
-            availability="available",
-            provider_availability="available",
-            models=models,
-        )
-
+        for provider_id, probe in probes.items()
+    )
     models = tuple(
-        ModelReadiness(model_id=model.id, availability="unchecked") for model in configured
+        ModelReadiness(
+            model_id=model.id,
+            availability=_model_availability(model, probes[model.provider_id]),
+        )
+        for model in configured
     )
-    return DiscoveryReadiness(
-        source="configuration",
-        live=False,
-        availability=probe.provider_availability,
-        provider_availability=probe.provider_availability,
-        models=models,
-    )
+    return GatewayReadiness(source="configuration", providers=providers, models=models)

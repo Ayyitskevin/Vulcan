@@ -27,6 +27,8 @@ from vulcan.providers.ollama import OllamaProvider
 from vulcan.readiness import RuntimeProbe
 from vulcan.registry import ModelRegistry
 
+PROVIDER_ID = "local-ollama"
+
 
 def _ollama_app(handler, *, ttl: float = 5.0) -> tuple[TestClient, httpx.AsyncClient]:
     client_http = httpx.AsyncClient(
@@ -35,26 +37,32 @@ def _ollama_app(handler, *, ttl: float = 5.0) -> tuple[TestClient, httpx.AsyncCl
         trust_env=False,
     )
     provider = OllamaProvider(
-        OllamaProviderConfig(kind="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0),
+        PROVIDER_ID,
+        OllamaProviderConfig(type="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0),
         client=client_http,
     )
     config = GatewayConfig(
-        schema_version=1,
+        schema_version=2,
         server=ServerConfig(host="127.0.0.1", port=8140, log_level="INFO"),
-        provider=OllamaProviderConfig(
-            kind="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0
-        ),
+        providers={
+            PROVIDER_ID: OllamaProviderConfig(
+                type="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=1.0
+            )
+        },
         readiness=ReadinessConfig(probe_ttl_seconds=ttl),
         models=(
             ModelConfig(
                 id="public-chat",
-                runtime_name="runtime-chat",
+                provider=PROVIDER_ID,
+                provider_model="runtime-chat",
                 capabilities=frozenset({Capability.CHAT}),
             ),
         ),
     )
     return (
-        TestClient(create_app(config, provider=provider), base_url="http://127.0.0.1"),
+        TestClient(
+            create_app(config, providers={PROVIDER_ID: provider}), base_url="http://127.0.0.1"
+        ),
         client_http,
     )
 
@@ -99,7 +107,8 @@ def test_readiness_logs_probe_and_reuse_without_runtime_names(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     class CountingProvider:
-        kind: Literal["ollama"] = "ollama"
+        provider_type: Literal["ollama"] = "ollama"
+        provider_id = PROVIDER_ID
 
         def __init__(self) -> None:
             self.calls = 0
@@ -124,12 +133,13 @@ def test_readiness_logs_probe_and_reuse_without_runtime_names(
             (
                 ModelConfig(
                     id="public-chat",
-                    runtime_name="runtime-chat",
+                    provider=PROVIDER_ID,
+                    provider_model="runtime-chat",
                     capabilities=frozenset({Capability.CHAT}),
                 ),
             )
         ),
-        provider,
+        {PROVIDER_ID: provider},
         readiness_ttl_seconds=5.0,
     )
     stream = io.StringIO()
@@ -146,8 +156,8 @@ def test_readiness_logs_probe_and_reuse_without_runtime_names(
     lines = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
     events = [row["event"] for row in lines]
     assert events == ["readiness_probed", "readiness_reused"]
+    assert lines[0]["providers_configured"] == 1
     assert lines[0]["models_available"] == 1
-    assert lines[0]["live"] is True
     assert lines[0]["forced"] is False
     assert lines[0]["reused"] is False
     assert lines[1]["reused"] is True

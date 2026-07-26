@@ -7,7 +7,9 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from vulcan.config import PUBLIC_MODEL_PATTERN, Capability
+from vulcan.config import PROVIDER_ID_PATTERN, PUBLIC_MODEL_PATTERN, Capability
+
+ProviderType = Literal["ollama", "anthropic", "openai_compatible", "deterministic"]
 
 
 class StrictSchema(BaseModel):
@@ -51,8 +53,11 @@ class ChatCompletionRequest(StrictSchema):
 Availability = Literal["available", "unavailable", "unchecked"]
 
 
-class ProviderHealth(StrictSchema):
-    kind: Literal["ollama", "deterministic"]
+class ProviderStatus(StrictSchema):
+    """One configured provider instance's honest readiness annotation."""
+
+    id: str = Field(pattern=PROVIDER_ID_PATTERN)
+    type: ProviderType
     availability: Availability
 
 
@@ -60,20 +65,19 @@ class HealthResponse(StrictSchema):
     status: Literal["ok"] = "ok"
     service: Literal["vulcan"] = "vulcan"
     api_version: Literal["v1"] = "v1"
-    provider: ProviderHealth
+    providers: tuple[ProviderStatus, ...]
     models_configured: int = Field(ge=0)
 
 
 class DiscoveryMetadata(StrictSchema):
     source: Literal["configuration"] = "configuration"
-    live: bool = False
-    availability: Availability = "unchecked"
 
 
 class ModelRecord(StrictSchema):
     id: str
     object: Literal["model"] = "model"
-    provider: Literal["ollama", "deterministic"]
+    provider: str = Field(pattern=PROVIDER_ID_PATTERN)
+    provider_type: ProviderType
     capabilities: tuple[Capability, ...]
     availability: Availability = "unchecked"
     description: str | None = None
@@ -124,7 +128,7 @@ class ChatCompletionResponse(StrictSchema):
     object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(ge=0)
     model: str
-    provider: Literal["ollama", "deterministic"]
+    provider: str = Field(pattern=PROVIDER_ID_PATTERN)
     choices: tuple[ChatChoice, ...]
     usage: TokenUsage | None = None
 

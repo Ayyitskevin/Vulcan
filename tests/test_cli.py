@@ -11,6 +11,43 @@ import uvicorn
 import vulcan.cli as cli
 from vulcan.config import DeterministicProviderConfig, GatewayConfig
 
+MULTI_PROVIDER_CONFIG = """\
+schema_version = 2
+
+[server]
+host = "127.0.0.1"
+port = 18140
+log_level = "INFO"
+
+[providers.local-ollama]
+type = "ollama"
+base_url = "http://127.0.0.1:11434"
+timeout_seconds = 60.0
+
+[providers.openai]
+type = "openai_compatible"
+base_url = "https://api.example-vendor.com/v1"
+api_key_env = "VULCAN_CLI_TEST_OPENAI_KEY"
+timeout_seconds = 60.0
+
+[providers.anthropic]
+type = "anthropic"
+api_key_env = "VULCAN_CLI_TEST_ANTHROPIC_KEY"
+timeout_seconds = 60.0
+
+[[models]]
+id = "local-chat"
+provider = "local-ollama"
+provider_model = "some-installed-model"
+capabilities = ["chat"]
+
+[[models]]
+id = "cloud-chat"
+provider = "openai"
+provider_model = "vendor-model"
+capabilities = ["chat"]
+"""
+
 
 def _write_config(tmp_path: Path, content: str, *, name: str = "vulcan.toml") -> Path:
     path = tmp_path / name
@@ -61,16 +98,17 @@ def test_invalid_config_reports_paths_and_reason_codes_without_raw_values(
     config_path = _write_config(
         tmp_path,
         f"""\
-schema_version = 1
+schema_version = 2
 
-[provider]
-kind = "ollama"
+[providers.local]
+type = "ollama"
     timeout_seconds = 60
 base_url = "http://local-user:{credential_sentinel}@127.0.0.1:11434"
 
 [[models]]
 id = "public-model"
-runtime_name = "{runtime_sentinel}"
+provider = "local"
+provider_model = "{runtime_sentinel}"
 capabilities = ["chat"]
 """,
     )
@@ -89,7 +127,7 @@ capabilities = ["chat"]
             "retryable": False,
             "validation": [
                 {
-                    "path": "provider.ollama.base_url",
+                    "path": "providers.local.ollama.base_url",
                     "reason": "value_error",
                 }
             ],
@@ -105,6 +143,40 @@ capabilities = ["chat"]
     assert "Traceback" not in captured.err
 
 
+def test_v1_config_fails_with_migration_guidance(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _write_config(
+        tmp_path,
+        """\
+schema_version = 1
+
+[provider]
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+timeout_seconds = 60.0
+
+[[models]]
+id = "local-chat"
+runtime_name = "some-model"
+capabilities = ["chat"]
+""",
+    )
+    monkeypatch.setattr(uvicorn, "run", _forbid_server_start)
+
+    exit_code = cli.main(["serve", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    payload = json.loads(captured.err)
+    assert payload["error"]["code"] == "configuration_error"
+    assert "schema_version 2" in payload["error"]["message"]
+    assert "provider_model" in payload["error"]["message"]
+    assert "Traceback" not in captured.err
+
+
 def test_malformed_toml_never_echoes_source_text(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -113,7 +185,7 @@ def test_malformed_toml_never_echoes_source_text(
     source_sentinel = "malformed-source-secret-56bfe272"
     config_path = _write_config(
         tmp_path,
-        f'[provider]\nkind = "deterministic"\nresponse_text = "{source_sentinel}\n',
+        f'[providers.det]\ntype = "deterministic"\nresponse_text = "{source_sentinel}\n',
     )
     monkeypatch.setattr(uvicorn, "run", _forbid_server_start)
 
@@ -143,20 +215,21 @@ def test_valid_cli_passes_loopback_and_hardening_options_without_starting_networ
     config_path = _write_config(
         tmp_path,
         f"""\
-schema_version = 1
+schema_version = 2
 
 [server]
 host = "127.0.0.1"
 port = 18140
 log_level = "INFO"
 
-[provider]
-kind = "deterministic"
+[providers.det]
+type = "deterministic"
 response_text = "{response_sentinel}"
 
 [[models]]
 id = "local-test"
-runtime_name = "local-test-runtime"
+provider = "det"
+provider_model = "local-test-runtime"
 capabilities = ["chat"]
 """,
     )
@@ -197,5 +270,107 @@ capabilities = ["chat"]
     }
     config = calls["config"]
     assert isinstance(config, GatewayConfig)
-    assert isinstance(config.provider, DeterministicProviderConfig)
-    assert config.provider.response_text == response_sentinel
+    provider = config.providers["det"]
+    assert isinstance(provider, DeterministicProviderConfig)
+    assert provider.response_text == response_sentinel
+
+
+# ── vulcan check: credential availability without value exposure ─────────────
+
+
+def test_check_reports_present_and_missing_credentials_without_values(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_sentinel = "sk-super-secret-value-77aa88bb"
+    monkeypatch.setenv("VULCAN_CLI_TEST_OPENAI_KEY", secret_sentinel)
+    monkeypatch.delenv("VULCAN_CLI_TEST_ANTHROPIC_KEY", raising=False)
+    monkeypatch.setattr(uvicorn, "run", _forbid_server_start)
+    config_path = _write_config(tmp_path, MULTI_PROVIDER_CONFIG)
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1  # valid config, one credential missing
+    assert captured.err == ""
+    report = json.loads(captured.out)
+    assert report["config"] == "valid"
+    assert report["schema_version"] == 2
+    assert report["models_configured"] == 2
+    assert report["credentials_missing"] == 1
+    by_id = {entry["id"]: entry for entry in report["providers"]}
+    assert by_id["local-ollama"] == {"id": "local-ollama", "type": "ollama", "models": 1}
+    assert by_id["openai"] == {
+        "id": "openai",
+        "type": "openai_compatible",
+        "models": 1,
+        "api_key_env": "VULCAN_CLI_TEST_OPENAI_KEY",
+        "credential": "present",
+    }
+    assert by_id["anthropic"] == {
+        "id": "anthropic",
+        "type": "anthropic",
+        "models": 0,
+        "api_key_env": "VULCAN_CLI_TEST_ANTHROPIC_KEY",
+        "credential": "missing",
+    }
+    assert secret_sentinel not in captured.out
+
+
+def test_check_exits_zero_when_all_credentials_are_present(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VULCAN_CLI_TEST_OPENAI_KEY", "sk-present-one")
+    monkeypatch.setenv("VULCAN_CLI_TEST_ANTHROPIC_KEY", "sk-present-two")
+    monkeypatch.setattr(uvicorn, "run", _forbid_server_start)
+    config_path = _write_config(tmp_path, MULTI_PROVIDER_CONFIG)
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    report = json.loads(captured.out)
+    assert report["credentials_missing"] == 0
+    assert "sk-present-one" not in captured.out
+    assert "sk-present-two" not in captured.out
+
+
+@pytest.mark.parametrize("unusable", ["", "   ", "with space", "line\nbreak", "tab\tchar"])
+def test_check_treats_blank_or_non_printable_values_as_missing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    unusable: str,
+) -> None:
+    monkeypatch.setenv("VULCAN_CLI_TEST_OPENAI_KEY", unusable)
+    monkeypatch.setenv("VULCAN_CLI_TEST_ANTHROPIC_KEY", "sk-usable")
+    monkeypatch.setattr(uvicorn, "run", _forbid_server_start)
+    config_path = _write_config(tmp_path, MULTI_PROVIDER_CONFIG)
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    report = json.loads(captured.out)
+    by_id = {entry["id"]: entry for entry in report["providers"]}
+    assert by_id["openai"]["credential"] == "missing"
+
+
+def test_check_invalid_config_uses_the_same_sanitized_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uvicorn, "run", _forbid_server_start)
+    config_path = _write_config(tmp_path, "schema_version = 2\n")
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["error"]["code"] == "configuration_error"
