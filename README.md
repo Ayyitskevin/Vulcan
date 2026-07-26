@@ -41,7 +41,9 @@ endpoints just to render metadata — so their models are reported as configured
 `unchecked` until a real request uses them.
 
 The design record for the multi-provider architecture is in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the phased continuation plan
+(streaming, embeddings, operator tooling) is in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Local setup
 
