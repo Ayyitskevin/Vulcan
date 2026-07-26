@@ -12,6 +12,7 @@ Read order before any work: `README.md` → `docs/ARCHITECTURE.md` → this file
 
 ## 1. How to work this plan (agent operating instructions)
 
+0. **Next phase: Phase 2 (embeddings).** Phase 1 is complete and merged.
 1. **One phase per pull request.** Complete phases strictly in order. Do not
    start phase N+1 in the same PR as phase N. Small preparatory refactors
    belong in the phase PR that needs them.
@@ -87,7 +88,14 @@ predictability, safety, and honesty, not feature breadth.
 
 ---
 
-## 5. Phase 1 — Streaming chat (SSE)
+## 5. Phase 1 — Streaming chat (SSE) — ✅ DONE
+
+Shipped: SSE chunks on `stream: true`, `chat_stream` on all four adapters, the
+pre-stream/mid-stream error split, cancellation handling, and streaming
+coverage in `tests/test_streaming.py` plus `scripts/smoke.py`. The contract as
+built is documented in the README ("Streaming") and `docs/ARCHITECTURE.md`
+("Streaming (added after v2)"). The specification below is retained as the
+design record.
 
 **Why first:** most local tools assume `stream: true` works on an
 OpenAI-style endpoint; it is the largest remaining gap between Vulcan and the

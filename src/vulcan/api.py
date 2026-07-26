@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -15,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import RequestResponseEndpoint
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from vulcan import __version__
 from vulcan.config import GatewayConfig
@@ -28,6 +29,7 @@ from vulcan.schemas import (
     Availability,
     CapabilitiesResponse,
     ChatCapability,
+    ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
     DiscoveryMetadata,
@@ -130,6 +132,42 @@ def _json_error(
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+SSE_DONE = "data: [DONE]\n\n"
+
+
+def _sse_frame(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+def _chunk_frame(chunk: ChatCompletionChunk) -> str:
+    """Render one chunk, omitting absent delta fields like the OpenAI wire shape.
+
+    ``finish_reason`` stays present (null until the final chunk); ``usage`` is
+    omitted entirely unless the upstream reported both counts.
+    """
+
+    payload = chunk.model_dump(mode="json")
+    for choice in payload["choices"]:
+        choice["delta"] = {
+            key: value for key, value in choice["delta"].items() if value is not None
+        }
+    if payload.get("usage") is None:
+        payload.pop("usage", None)
+    return _sse_frame(payload)
+
+
+def _error_frame(exc: VulcanError, request_id: str) -> str:
+    """Terminal event for a failure after the response headers were committed."""
+
+    body = ErrorBody(
+        code=exc.code,
+        message=exc.message,
+        retryable=exc.retryable,
+        details=exc.details,
+    )
+    return _sse_frame({"error": body.model_dump(mode="json"), "request_id": request_id})
 
 
 def create_app(
@@ -342,14 +380,46 @@ def create_app(
     async def capabilities() -> CapabilitiesResponse:
         return CapabilitiesResponse(chat_completions=ChatCapability())
 
+    async def _stream_response(payload: ChatCompletionRequest, request: Request) -> Response:
+        """Render one chat stream as Server-Sent Events.
+
+        The first chunk is pulled *before* the response starts so pre-stream
+        failures still produce a normal JSON error envelope with the right
+        status. Once headers are committed, a failure can only be reported as
+        one terminal error event, and the stream then closes without [DONE].
+        """
+
+        request_id = _request_id(request)
+        chunks = gateway.chat_stream(payload, request_id=request_id).__aiter__()
+        # A VulcanError here propagates to the normal exception handlers.
+        first = await chunks.__anext__()
+
+        async def body() -> AsyncIterator[str]:
+            try:
+                yield _chunk_frame(first)
+                async for chunk in chunks:
+                    yield _chunk_frame(chunk)
+            except VulcanError as exc:
+                yield _error_frame(exc, request_id)
+                return
+            finally:
+                await chunks.aclose()
+            yield SSE_DONE
+
+        return StreamingResponse(
+            body(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     @app.post(
         "/v1/chat/completions",
         response_model=ChatCompletionResponse,
         responses=ERROR_RESPONSES,
     )
-    async def chat_completions(
-        payload: ChatCompletionRequest, request: Request
-    ) -> ChatCompletionResponse:
+    async def chat_completions(payload: ChatCompletionRequest, request: Request) -> Any:
+        if payload.stream:
+            return await _stream_response(payload, request)
         return await gateway.chat(payload, request_id=_request_id(request))
 
     return app

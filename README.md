@@ -2,9 +2,9 @@
 
 Vulcan is a local-first, single-user AI gateway for explicitly configured local and
 BYOK (bring-your-own-key) models. Same-machine clients get one stable loopback API to
-discover configured model aliases and submit guarded, non-streaming chat requests;
-each alias routes to exactly one named provider — a local Ollama runtime or a hosted
-API used with your own key.
+discover configured model aliases and submit guarded chat requests, buffered or
+streaming; each alias routes to exactly one named provider — a local Ollama runtime
+or a hosted API used with your own key.
 
 Vulcan is infrastructure. It is not a chat UI, agent framework, autonomous router,
 model downloader, training system, credential manager, billing platform, or
@@ -42,7 +42,7 @@ endpoints just to render metadata — so their models are reported as configured
 
 The design record for the multi-provider architecture is in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the phased continuation plan
-(streaming, embeddings, operator tooling) is in
+(embeddings, operator tooling) is in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Local setup
@@ -160,8 +160,8 @@ discovery metadata changed:
 ## API contract
 
 This is a documented subset of the OpenAI chat-completions shape, not full OpenAI
-compatibility. Tools, images, streaming, logprobs, response formats, and other
-fields are rejected or unsupported.
+compatibility. Tools, images, logprobs, response formats, and other fields are
+rejected or unsupported.
 
 The machine-readable schema is available at `/openapi.json`; CDN-backed docs UIs are
 disabled.
@@ -171,8 +171,8 @@ disabled.
 | `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, one entry per configured provider (`id`, `type`, honest `availability`), and model count. Optional `?refresh=true` forces a new probe. |
 | `GET` | `/v1/models` | Configured public aliases only: description, declared capabilities, selected provider ID/type, and readiness annotation. Optional `?refresh=true`. |
 | `GET` | `/v1/models/{id}` | One configured public model with the same annotation; `model_not_found` if the alias is not configured. Optional `?refresh=true`. |
-| `GET` | `/v1/capabilities` | Callable v1 gateway features: non-streaming chat, supported roles, and configuration-driven discovery. |
-| `POST` | `/v1/chat/completions` | One selected-alias, non-streaming chat request routed to exactly one provider. |
+| `GET` | `/v1/capabilities` | Callable v1 gateway features: chat (buffered and streaming), supported roles, and configuration-driven discovery. |
+| `POST` | `/v1/chat/completions` | One selected-alias chat request routed to exactly one provider; buffered JSON by default, Server-Sent Events when `stream: true`. |
 
 Chat request fields:
 
@@ -189,8 +189,7 @@ Chat request fields:
 `messages` must contain 1–64 entries and at least one `user` message. Roles are
 `system`, `user`, or `assistant`; each content field must be nonblank. `temperature`
 is 0–2, `max_tokens` is 1–32768, and combined message content is capped at 65536
-characters. Unknown fields are rejected. `stream: true` returns
-`unsupported_capability`.
+characters. Unknown fields are rejected.
 
 Anthropic-specific constraints (rejected locally with `unsupported_capability`
 instead of guessing at upstream behavior): `temperature` above 1, and conversations
@@ -219,6 +218,38 @@ request.
   "usage": null
 }
 ```
+
+### Streaming
+
+`stream: true` returns `Content-Type: text/event-stream` with OpenAI-style chunks:
+one `data:` frame per event, terminated by `data: [DONE]`. The first chunk carries
+`delta.role`, later chunks carry `delta.content`, and the final chunk carries
+`finish_reason` (plus `usage` only when the upstream reported both counts). Absent
+delta fields are omitted; `finish_reason` is always present (null until the end).
+
+```
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1784550000,"model":"local-chat","provider":"local-ollama","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1784550000,"model":"local-chat","provider":"local-ollama","choices":[{"index":0,"delta":{"content":"Ready."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1784550000,"model":"local-chat","provider":"local-ollama","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+Failures **before** the first byte (unknown alias, missing credential, upstream
+auth failure, …) return the ordinary JSON error envelope with its normal status
+code — a streaming request that fails early never becomes a 200. Once headers are
+committed, a failure can only be reported inside the stream: Vulcan emits one
+terminal error frame carrying the same normalized error body and then closes
+**without** `[DONE]`. Upstream bodies are never forwarded.
+
+```
+data: {"error":{"code":"provider_protocol_error","message":"The selected provider returned an invalid response.","retryable":false,"details":{"provider":"local-ollama"},"validation":null},"request_id":"…"}
+```
+
+Clients that disconnect mid-stream cancel the upstream request; Vulcan closes the
+provider response rather than draining it.
 
 All request failures use the same envelope and include a generated `X-Request-ID`
 response header. Validation details contain only field paths and reason codes;
@@ -308,7 +339,7 @@ live inventory; hosted providers always report `unchecked` without any probe.
 ## What Vulcan does not do
 
 No auth layer, multi-user state, telemetry, billing, quota tracking, model
-management or downloads, streaming, tools, images, embeddings endpoints, agents,
+management or downloads, tools, images, embeddings endpoints, agents,
 UI, deployment tooling, retries, fallback, or credential storage. Hosted providers
 are never probed for health or model catalogues; a hosted model's availability is
 learned when a request uses it. A shared SDK should wait until at least two

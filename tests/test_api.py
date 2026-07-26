@@ -34,6 +34,8 @@ from vulcan.providers.base import (
     ProviderChatResult,
     ProviderMessage,
     ProviderTokenUsage,
+    StreamDelta,
+    StreamEnd,
 )
 
 PROMPT_SENTINEL = "prompt-must-not-escape-6f024f37"
@@ -72,6 +74,13 @@ class RecordingProvider:
         if self.failure is not None:
             raise self.failure
         return self.result
+
+    async def chat_stream(self, request: ProviderChatRequest):
+        self.calls.append(request)
+        if self.failure is not None:
+            raise self.failure
+        yield StreamDelta(text=self.result.content)
+        yield StreamEnd(finish_reason=self.result.finish_reason, usage=self.result.usage)
 
     async def discover_runtime(self):
         from vulcan.readiness import RuntimeProbe
@@ -214,7 +223,7 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
     _assert_request_id(response)
 
 
-def test_capabilities_state_the_small_non_streaming_contract_exactly() -> None:
+def test_capabilities_state_the_small_callable_contract_exactly() -> None:
     with _client(create_app(_config())) as client:
         response = client.get("/v1/capabilities")
 
@@ -225,7 +234,7 @@ def test_capabilities_state_the_small_non_streaming_contract_exactly() -> None:
         "callable_capabilities": ["chat"],
         "chat_completions": {
             "supported": True,
-            "streaming": False,
+            "streaming": True,
             "message_roles": ["system", "user", "assistant"],
         },
     }
@@ -469,23 +478,13 @@ def test_unknown_model_is_normalized_before_provider_invocation() -> None:
     assert PROMPT_SENTINEL not in response.text
 
 
-@pytest.mark.parametrize(
-    ("model", "stream", "capability"),
-    [
-        pytest.param("public-embed", False, "chat", id="model-lacks-chat"),
-        pytest.param("public-chat", True, "streaming", id="streaming-not-supported"),
-    ],
-)
-def test_unsupported_capability_is_normalized_before_provider_invocation(
-    model: str,
-    stream: bool,
-    capability: str,
-) -> None:
+def test_unsupported_capability_is_normalized_before_provider_invocation() -> None:
+    model, capability = "public-embed", "chat"
     provider = RecordingProvider()
     with _client(create_app(_config(), providers={"test-provider": provider})) as client:
         response = client.post(
             "/v1/chat/completions",
-            json=_valid_chat(model=model, stream=stream),
+            json=_valid_chat(model=model),
         )
 
     assert response.status_code == 422

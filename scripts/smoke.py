@@ -43,6 +43,29 @@ def _request(
         return response.status, json.loads(response.read().decode("utf-8"))
 
 
+def _stream(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    payload: dict[str, Any],
+) -> tuple[int, str, str]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with opener.open(request, timeout=5.0) as response:
+        return (
+            response.status,
+            response.headers.get("Content-Type", ""),
+            response.read().decode("utf-8"),
+        )
+
+
+def _sse_frames(body: str) -> list[str]:
+    return [line[len("data: ") :] for line in body.splitlines() if line.startswith("data: ")]
+
+
 def _wait_for_health(opener: urllib.request.OpenerDirector, base_url: str) -> None:
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
@@ -130,7 +153,33 @@ capabilities = ["chat"]
                 },
             )
             statuses = (health_status, models_status, model_status, capabilities_status)
+            stream_status, stream_content_type, stream_body = _stream(
+                opener,
+                f"{base_url}/v1/chat/completions",
+                {
+                    "model": "vulcan-smoke",
+                    "messages": [{"role": "user", "content": PROMPT_SENTINEL}],
+                    "stream": True,
+                },
+            )
             assert statuses == (200, 200, 200, 200) and chat_status == 200
+            assert stream_status == 200
+            assert stream_content_type.startswith("text/event-stream")
+            stream_frames = _sse_frames(stream_body)
+            assert stream_frames[-1] == "[DONE]"
+            stream_chunks = [json.loads(frame) for frame in stream_frames[:-1]]
+            assert [chunk["choices"][0]["delta"] for chunk in stream_chunks] == [
+                {"role": "assistant"},
+                {"content": RESPONSE_SENTINEL},
+                {},
+            ]
+            assert [chunk["choices"][0]["finish_reason"] for chunk in stream_chunks] == [
+                None,
+                None,
+                "stop",
+            ]
+            assert all(chunk["object"] == "chat.completion.chunk" for chunk in stream_chunks)
+            assert all(chunk["provider"] == "smoke" for chunk in stream_chunks)
             assert health["providers"] == [
                 {"id": "smoke", "type": "deterministic", "availability": "available"}
             ]
@@ -142,7 +191,7 @@ capabilities = ["chat"]
             assert model["id"] == "vulcan-smoke"
             assert model["provider"] == "smoke"
             assert model["availability"] == "available"
-            assert capabilities["chat_completions"]["streaming"] is False
+            assert capabilities["chat_completions"]["streaming"] is True
             assert chat["choices"][0]["message"]["content"] == RESPONSE_SENTINEL
         finally:
             if process.poll() is None:
@@ -170,7 +219,9 @@ capabilities = ["chat"]
                     "model_retrieve": model_status,
                     "capabilities": capabilities_status,
                     "chat_completions": chat_status,
+                    "chat_completions_stream": stream_status,
                 },
+                "stream_verified": True,
                 "chat_response_verified": True,
                 "content_absent_from_logs": True,
             },

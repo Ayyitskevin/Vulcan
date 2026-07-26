@@ -166,6 +166,41 @@ Key rules:
   `availability`); `/v1/models` and `/v1/chat/completions` report the selected
   provider ID per model/request.
 
+## Streaming (added after v2)
+
+`stream: true` on `/v1/chat/completions` returns Server-Sent Events carrying
+OpenAI-style `chat.completion.chunk` frames, terminated by `data: [DONE]`.
+Routing, preflight, per-provider probing, error normalization, and logging are
+identical to the buffered path — streaming changes the transport, not the
+policy, and still issues exactly one upstream call per request.
+
+- **Provider boundary.** `Provider.chat_stream()` returns an async iterator of
+  `StreamDelta(text)` events followed by exactly one `StreamEnd(finish_reason,
+  usage)`. A stream that ends without `StreamEnd` is a truncated reply and maps
+  to `provider_protocol_error`; usage is still reported only when the upstream
+  supplied both counts.
+- **Error boundary.** Adapters open the upstream connection and classify its
+  status *before* yielding, so pre-stream failures still produce an ordinary
+  JSON error envelope with its normal status code. After the response headers
+  are committed the gateway can no longer change the status, so a failure is
+  emitted as one terminal SSE frame containing the same normalized error body
+  (plus `request_id`) and the stream closes without `[DONE]`. Upstream bodies
+  are never forwarded in either case.
+- **Cancellation.** Adapters send with `stream=True` and close the response in
+  a `finally`, rather than using httpx's `stream()` context manager: closing an
+  async generator suspended inside that context manager violates contextlib's
+  athrow protocol, whereas an explicit close releases the upstream connection
+  cleanly when a client disconnects mid-stream.
+- **Translation.** OpenAI-compatible: SSE `data:` frames, `delta.content`
+  accumulated, `[DONE]` ends the stream, usage taken from whichever chunk
+  provides it (`stream_options.include_usage` is deliberately not sent — vendor
+  support varies). Anthropic: `message_start` (input tokens),
+  `content_block_delta`/`text_delta` (text), `message_delta` (stop reason,
+  output tokens), `message_stop` (end); any non-text block or delta type is a
+  protocol error, and `error` events are classified from their type alone.
+  Ollama: newline-delimited JSON, terminal `done: true` chunk carries the
+  reason and eval counts.
+
 ## Error normalization
 
 All upstream failures map to stable Vulcan codes; upstream bodies are parsed
@@ -242,7 +277,7 @@ explicitly. The README carries the operator-facing step-by-step guide.
 
 ## Deliberately deferred
 
-- Streaming, tools, images, embeddings endpoints, agents, and any UI.
+- Tools, images, embeddings endpoints, agents, and any UI.
 - Retries/backoff (risk of duplicate charges), circuit breakers, fallback
   chains, load balancing, and “best model” selection.
 - Hosted-provider readiness probing (billable), model catalogue discovery,

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, Literal
 
 import httpx
@@ -19,7 +20,10 @@ from vulcan.errors import (
 from vulcan.providers.base import (
     ProviderChatRequest,
     ProviderChatResult,
+    ProviderStreamEvent,
     ProviderTokenUsage,
+    StreamDelta,
+    StreamEnd,
 )
 from vulcan.providers.http import build_client
 from vulcan.readiness import RuntimeProbe
@@ -40,6 +44,36 @@ class _OllamaChatResponse(BaseModel):
     done_reason: str | None = None
     prompt_eval_count: int | None = None
     eval_count: int | None = None
+
+
+class _OllamaStreamChunk(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    message: _OllamaMessage | None = None
+    done: bool
+    done_reason: str | None = None
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+
+
+def _finish_reason(done_reason: str | None) -> Literal["stop", "length"] | None:
+    if done_reason == "length":
+        return "length"
+    if done_reason in {None, "stop"}:
+        return "stop"
+    return None
+
+
+def _usage(prompt_eval_count: int | None, eval_count: int | None) -> ProviderTokenUsage | None:
+    """Token usage only when the runtime reported both counts, never invented."""
+
+    if (prompt_eval_count is not None and prompt_eval_count < 0) or (
+        eval_count is not None and eval_count < 0
+    ):
+        raise ProviderProtocolError
+    if prompt_eval_count is None or eval_count is None:
+        return None
+    return ProviderTokenUsage(prompt_tokens=prompt_eval_count, completion_tokens=eval_count)
 
 
 class _OllamaTagModel(BaseModel):
@@ -71,13 +105,14 @@ class OllamaProvider:
             timeout_seconds=config.timeout_seconds,
         )
 
-    async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
+    @staticmethod
+    def _payload(request: ProviderChatRequest, *, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.provider_model,
             "messages": [
                 {"role": message.role, "content": message.content} for message in request.messages
             ],
-            "stream": False,
+            "stream": stream,
         }
         options: dict[str, float | int] = {}
         if request.temperature is not None:
@@ -86,6 +121,25 @@ class OllamaProvider:
             options["num_predict"] = request.max_tokens
         if options:
             payload["options"] = options
+        return payload
+
+    @staticmethod
+    def _raise_for_status(status_code: int, body: object) -> None:
+        """Ollama's 404 means either 'no such model' or 'no such route'."""
+
+        if status_code == 404:
+            error_message = body.get("error") if isinstance(body, Mapping) else None
+            if (
+                isinstance(error_message, str)
+                and "model" in error_message.casefold()
+                and "not found" in error_message.casefold()
+            ):
+                raise ModelUnavailableError
+            raise ProviderError(retryable=False)
+        raise ProviderError(retryable=status_code >= 500 or status_code in {408, 429})
+
+    async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
+        payload = self._payload(request, stream=False)
 
         try:
             response = await self._client.post("/api/chat", json=payload)
@@ -94,23 +148,12 @@ class OllamaProvider:
         except httpx.RequestError as exc:
             raise ProviderUnavailableError from exc
 
-        if response.status_code == 404:
+        if not response.is_success:
             try:
                 error_body = response.json()
             except ValueError:
                 error_body = None
-            error_message = error_body.get("error") if isinstance(error_body, Mapping) else None
-            if (
-                isinstance(error_message, str)
-                and "model" in error_message.casefold()
-                and "not found" in error_message.casefold()
-            ):
-                raise ModelUnavailableError
-            raise ProviderError(retryable=False)
-        if not response.is_success:
-            raise ProviderError(
-                retryable=response.status_code >= 500 or response.status_code in {408, 429}
-            )
+            self._raise_for_status(response.status_code, error_body)
 
         try:
             parsed = _OllamaChatResponse.model_validate(response.json())
@@ -119,29 +162,66 @@ class OllamaProvider:
         if not parsed.done:
             raise ProviderProtocolError
 
-        finish_reason: Literal["stop", "length"] | None
-        if parsed.done_reason == "length":
-            finish_reason = "length"
-        elif parsed.done_reason in {None, "stop"}:
-            finish_reason = "stop"
-        else:
-            finish_reason = None
-
-        usage = None
-        if (parsed.prompt_eval_count is not None and parsed.prompt_eval_count < 0) or (
-            parsed.eval_count is not None and parsed.eval_count < 0
-        ):
-            raise ProviderProtocolError
-        if parsed.prompt_eval_count is not None and parsed.eval_count is not None:
-            usage = ProviderTokenUsage(
-                prompt_tokens=parsed.prompt_eval_count,
-                completion_tokens=parsed.eval_count,
-            )
         return ProviderChatResult(
             content=parsed.message.content,
-            finish_reason=finish_reason,
-            usage=usage,
+            finish_reason=_finish_reason(parsed.done_reason),
+            usage=_usage(parsed.prompt_eval_count, parsed.eval_count),
         )
+
+    async def chat_stream(self, request: ProviderChatRequest) -> AsyncIterator[ProviderStreamEvent]:
+        """Stream one chat completion over Ollama's newline-delimited JSON.
+
+        The upstream connection is opened and classified before any event is
+        yielded; closing this iterator closes the upstream response.
+        """
+
+        payload = self._payload(request, stream=True)
+        finish_reason: Literal["stop", "length"] | None = None
+        usage: ProviderTokenUsage | None = None
+
+        # An explicit send/close pair (rather than the stream() context manager)
+        # keeps the upstream response closable when the consumer abandons this
+        # generator mid-stream, e.g. on client disconnect.
+        upstream = self._client.build_request("POST", "/api/chat", json=payload)
+        try:
+            response = await self._client.send(upstream, stream=True)
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError from exc
+        except httpx.RequestError as exc:
+            raise ProviderUnavailableError from exc
+
+        try:
+            if not response.is_success:
+                error_body: object = None
+                try:
+                    error_body = json.loads(await response.aread())
+                except ValueError:
+                    error_body = None
+                self._raise_for_status(response.status_code, error_body)
+            async for line in response.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    chunk = _OllamaStreamChunk.model_validate(json.loads(line))
+                except (ValueError, ValidationError) as exc:
+                    raise ProviderProtocolError from exc
+                if chunk.message is not None and chunk.message.content:
+                    yield StreamDelta(text=chunk.message.content)
+                if chunk.done:
+                    finish_reason = _finish_reason(chunk.done_reason)
+                    usage = _usage(chunk.prompt_eval_count, chunk.eval_count)
+                    break
+            else:
+                # The runtime closed without a done chunk: truncated reply.
+                raise ProviderProtocolError
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError from exc
+        except httpx.RequestError as exc:
+            raise ProviderUnavailableError from exc
+        finally:
+            await response.aclose()
+
+        yield StreamEnd(finish_reason=finish_reason, usage=usage)
 
     async def discover_runtime(self) -> RuntimeProbe:
         """List installed runtime names via Ollama ``/api/tags`` with finite timeout.
