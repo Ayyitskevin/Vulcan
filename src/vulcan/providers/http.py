@@ -10,6 +10,7 @@ stored on a client, logged, or attached to an error.
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -66,6 +67,20 @@ def resolve_api_key(api_key_env: str) -> str:
     if value is None:
         raise MissingCredentialError(api_key_env)
     return value
+
+
+async def iter_sse_payloads(response: httpx.Response) -> AsyncIterator[str]:
+    """Yield the payload of each ``data:`` field of a Server-Sent Events stream.
+
+    Comments (``:`` lines), blank lines, and every other SSE field (``event:``,
+    ``id:``, ``retry:``) are ignored: adapters classify events from the JSON
+    payload itself, which both supported vendors provide.
+    """
+
+    async for line in response.aiter_lines():
+        field = line.rstrip("\r")
+        if field.startswith("data:"):
+            yield field[len("data:") :].strip()
 
 
 def raise_for_hosted_status(status_code: int) -> None:

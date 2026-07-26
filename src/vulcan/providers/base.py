@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -37,6 +38,28 @@ class ProviderChatResult:
     usage: ProviderTokenUsage | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StreamDelta:
+    """One incremental piece of assistant text."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamEnd:
+    """Terminal event of a provider stream.
+
+    Adapters must emit exactly one of these on clean completion; a stream that
+    ends without it is treated as a truncated (protocol-error) response.
+    """
+
+    finish_reason: Literal["stop", "length"] | None
+    usage: ProviderTokenUsage | None = None
+
+
+ProviderStreamEvent = StreamDelta | StreamEnd
+
+
 class Provider(Protocol):
     @property
     def provider_id(self) -> str:
@@ -50,6 +73,15 @@ class Provider(Protocol):
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
         """Submit one non-streaming chat request."""
+
+    def chat_stream(self, request: ProviderChatRequest) -> AsyncIterator[ProviderStreamEvent]:
+        """Submit one streaming chat request.
+
+        Implementations open the upstream connection and map non-success
+        statuses to Vulcan errors *before* yielding the first event, so the
+        gateway can still answer with a normal JSON error envelope. Closing
+        the returned iterator must release the upstream response.
+        """
 
     async def discover_runtime(self) -> RuntimeProbe:
         """Probe provider readiness without inventing model inventory."""

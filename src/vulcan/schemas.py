@@ -91,7 +91,7 @@ class ModelListResponse(StrictSchema):
 
 class ChatCapability(StrictSchema):
     supported: Literal[True] = True
-    streaming: Literal[False] = False
+    streaming: Literal[True] = True
     message_roles: tuple[MessageRole, ...] = (
         MessageRole.SYSTEM,
         MessageRole.USER,
@@ -130,6 +130,29 @@ class ChatCompletionResponse(StrictSchema):
     model: str
     provider: str = Field(pattern=PROVIDER_ID_PATTERN)
     choices: tuple[ChatChoice, ...]
+    usage: TokenUsage | None = None
+
+
+class ChunkDelta(StrictSchema):
+    """Incremental assistant output; absent fields are omitted when serialized."""
+
+    role: Literal["assistant"] | None = None
+    content: str | None = None
+
+
+class ChatCompletionChunkChoice(StrictSchema):
+    index: Literal[0] = 0
+    delta: ChunkDelta
+    finish_reason: Literal["stop", "length"] | None = None
+
+
+class ChatCompletionChunk(StrictSchema):
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int = Field(ge=0)
+    model: str
+    provider: str = Field(pattern=PROVIDER_ID_PATTERN)
+    choices: tuple[ChatCompletionChunkChoice, ...]
     usage: TokenUsage | None = None
 
 

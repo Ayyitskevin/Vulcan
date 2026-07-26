@@ -4,18 +4,26 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
+from typing import Literal
 from uuid import uuid4
 
 from vulcan.config import Capability
 from vulcan.errors import (
     ConfigurationError,
     ModelUnavailableError,
+    ProviderProtocolError,
     UnsupportedCapabilityError,
     VulcanError,
 )
-from vulcan.providers.base import Provider, ProviderChatRequest, ProviderMessage
+from vulcan.providers.base import (
+    Provider,
+    ProviderChatRequest,
+    ProviderMessage,
+    ProviderStreamEvent,
+    StreamDelta,
+)
 from vulcan.readiness import (
     READINESS_PROBE_TTL_SECONDS,
     GatewayReadiness,
@@ -23,12 +31,15 @@ from vulcan.readiness import (
     reconcile_configured_models,
     runtime_name_matches,
 )
-from vulcan.registry import ModelRegistry
+from vulcan.registry import ConfiguredModel, ModelRegistry
 from vulcan.schemas import (
     AssistantMessage,
     ChatChoice,
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChunkDelta,
     TokenUsage,
 )
 
@@ -189,42 +200,14 @@ class Gateway:
         provider: Provider | None = None
         try:
             if request.stream:
+                # Streaming belongs on chat_stream; the HTTP layer routes it
+                # there. Reaching here would silently buffer a stream instead.
                 raise UnsupportedCapabilityError("streaming", request.model)
-            model = self.registry.require_capability(request.model, Capability.CHAT)
-            provider = self._provider_for(model.provider_id)
-            metadata["provider"] = provider.provider_id
-            metadata["provider_type"] = provider.provider_type
-            # Preflight probes ONLY the routed provider (no-I/O for hosted and
-            # deterministic types) and short-circuits solely when a live list
-            # proved absence. Unchecked/provider-down falls through so the
-            # adapter fails loud. Unrelated providers are never contacted.
-            probe, _ = await self._probe_provider(model.provider_id)
-            if self._known_unavailable(probe, model.provider_model):
-                raise ModelUnavailableError(model.id)
-            provider_request = ProviderChatRequest(
-                provider_model=model.provider_model,
-                messages=tuple(
-                    ProviderMessage(role=message.role.value, content=message.content)
-                    for message in request.messages
-                ),
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-            )
+            model, provider = self._select_provider(request, metadata)
+            provider_request = await self._preflight(model, request)
             result = await provider.chat(provider_request)
-        except ModelUnavailableError as exc:
-            # Provider (or preflight) proved the model unavailable — drop that
-            # provider's stale inventory so its next probe is fresh, without
-            # discarding other providers' valid state.
-            if provider is not None:
-                self.invalidate_readiness(provider.provider_id)
-            self._annotate_provider(exc, provider)
-            logger.warning(
-                "chat_failed", extra={"metadata": {**metadata, "error_code": "model_unavailable"}}
-            )
-            raise
         except VulcanError as exc:
-            self._annotate_provider(exc, provider)
-            logger.warning("chat_failed", extra={"metadata": {**metadata, "error_code": exc.code}})
+            self._handle_chat_failure(exc, provider, metadata)
             raise
 
         usage = None
@@ -250,6 +233,162 @@ class Gateway:
                 ),
             ),
             usage=usage,
+        )
+
+    def _select_provider(
+        self,
+        request: ChatCompletionRequest,
+        metadata: dict[str, object],
+    ) -> tuple[ConfiguredModel, Provider]:
+        """Resolve the alias to exactly one configured provider; never a fallback."""
+
+        model = self.registry.require_capability(request.model, Capability.CHAT)
+        provider = self._provider_for(model.provider_id)
+        metadata["provider"] = provider.provider_id
+        metadata["provider_type"] = provider.provider_type
+        return model, provider
+
+    async def _preflight(
+        self,
+        model: ConfiguredModel,
+        request: ChatCompletionRequest,
+    ) -> ProviderChatRequest:
+        """Probe ONLY the routed provider and translate the request.
+
+        Short-circuits solely when a live inventory proved the native model
+        absent; unchecked or unreachable providers fall through so the adapter
+        fails loud. Unrelated providers are never contacted.
+        """
+
+        probe, _ = await self._probe_provider(model.provider_id)
+        if self._known_unavailable(probe, model.provider_model):
+            raise ModelUnavailableError(model.id)
+        return ProviderChatRequest(
+            provider_model=model.provider_model,
+            messages=tuple(
+                ProviderMessage(role=message.role.value, content=message.content)
+                for message in request.messages
+            ),
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+        )
+
+    def _handle_chat_failure(
+        self,
+        exc: VulcanError,
+        provider: Provider | None,
+        metadata: dict[str, object],
+    ) -> None:
+        """Annotate, invalidate stale inventory, and log one safe failure event."""
+
+        if isinstance(exc, ModelUnavailableError) and provider is not None:
+            # The model is proven absent — drop that provider's stale inventory
+            # so its next probe is fresh, without touching other providers.
+            self.invalidate_readiness(provider.provider_id)
+        self._annotate_provider(exc, provider)
+        logger.warning("chat_failed", extra={"metadata": {**metadata, "error_code": exc.code}})
+
+    @staticmethod
+    async def _next_event(
+        events: AsyncIterator[ProviderStreamEvent],
+    ) -> ProviderStreamEvent | None:
+        try:
+            return await events.__anext__()
+        except StopAsyncIteration:
+            return None
+
+    async def chat_stream(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        request_id: str | None = None,
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Stream one chat completion as OpenAI-style chunks.
+
+        Routing, preflight, and logging match the buffered path exactly. All
+        pre-stream failures (unknown alias, missing credential, upstream auth,
+        …) raise before the first chunk is yielded so the HTTP layer can still
+        answer with a normal JSON error envelope; failures after that raise
+        mid-iteration for the caller to render as a terminal error event.
+        """
+
+        metadata: dict[str, object] = {
+            "model": request.model,
+            "turn_count": len(request.messages),
+            "input_chars": sum(len(message.content) for message in request.messages),
+            "stream": True,
+        }
+        if request_id is not None:
+            metadata["request_id"] = request_id
+
+        provider: Provider | None = None
+        try:
+            model, provider = self._select_provider(request, metadata)
+            provider_request = await self._preflight(model, request)
+            events = provider.chat_stream(provider_request).__aiter__()
+            # Opening the upstream stream (and classifying its status) happens
+            # on this first pull, while a JSON error envelope is still possible.
+            event = await self._next_event(events)
+        except VulcanError as exc:
+            self._handle_chat_failure(exc, provider, metadata)
+            raise
+
+        completion_id = self._id_factory()
+        created = int(self._clock())
+
+        def chunk(
+            delta: ChunkDelta,
+            *,
+            finish_reason: Literal["stop", "length"] | None = None,
+            usage: TokenUsage | None = None,
+        ) -> ChatCompletionChunk:
+            return ChatCompletionChunk(
+                id=completion_id,
+                created=created,
+                model=request.model,
+                provider=provider.provider_id,
+                choices=(ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),),
+                usage=usage,
+            )
+
+        yield chunk(ChunkDelta(role="assistant"))
+
+        output_chars = 0
+        try:
+            completed = False
+            while event is not None:
+                if isinstance(event, StreamDelta):
+                    if event.text:
+                        output_chars += len(event.text)
+                        yield chunk(ChunkDelta(content=event.text))
+                    event = await self._next_event(events)
+                    continue
+                usage = None
+                if event.usage is not None:
+                    usage = TokenUsage(
+                        prompt_tokens=event.usage.prompt_tokens,
+                        completion_tokens=event.usage.completion_tokens,
+                        total_tokens=event.usage.prompt_tokens + event.usage.completion_tokens,
+                    )
+                yield chunk(ChunkDelta(), finish_reason=event.finish_reason, usage=usage)
+                completed = True
+                break
+            if not completed:
+                # The upstream closed without a terminal event: truncated reply.
+                raise ProviderProtocolError
+        except VulcanError as exc:
+            self._handle_chat_failure(exc, provider, metadata)
+            raise
+        finally:
+            # Releases the upstream response on normal completion, on error,
+            # and when the client disconnects mid-stream.
+            aclose = getattr(events, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+        logger.info(
+            "chat_completed",
+            extra={"metadata": {**metadata, "output_chars": output_chars}},
         )
 
     @staticmethod

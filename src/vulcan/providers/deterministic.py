@@ -1,9 +1,16 @@
 """Explicit no-I/O provider for tests and local contract checks."""
 
+from collections.abc import AsyncIterator
 from typing import Literal
 
 from vulcan.config import DeterministicProviderConfig
-from vulcan.providers.base import ProviderChatRequest, ProviderChatResult
+from vulcan.providers.base import (
+    ProviderChatRequest,
+    ProviderChatResult,
+    ProviderStreamEvent,
+    StreamDelta,
+    StreamEnd,
+)
 from vulcan.readiness import RuntimeProbe
 
 
@@ -17,6 +24,11 @@ class DeterministicProvider:
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
         del request
         return ProviderChatResult(content=self._response_text, finish_reason="stop")
+
+    async def chat_stream(self, request: ProviderChatRequest) -> AsyncIterator[ProviderStreamEvent]:
+        del request
+        yield StreamDelta(text=self._response_text)
+        yield StreamEnd(finish_reason="stop", usage=None)
 
     async def discover_runtime(self) -> RuntimeProbe:
         # In-process and non-network: known ready, but there is no external
