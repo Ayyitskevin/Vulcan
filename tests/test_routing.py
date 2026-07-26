@@ -211,10 +211,12 @@ def test_each_alias_reaches_exactly_its_own_upstream() -> None:
     assert canned_reply.status_code == 200
     assert canned_reply.json()["provider"] == "det"
 
-    # Exactly one chat call per hosted provider; no cross-provider traffic.
+    # Exactly one upstream call per hosted alias, and the Ollama transport is
+    # touched only by its own alias's preflight probe + chat — hosted chats
+    # must never trigger local probes.
     assert calls["openai"] == ["/v1/chat/completions"]
     assert calls["anthropic"] == ["/v1/messages"]
-    assert calls["local-ollama"].count("/api/chat") == 1
+    assert calls["local-ollama"] == ["/api/tags", "/api/chat"]
 
 
 def test_hosted_failure_never_falls_back_to_another_provider() -> None:
@@ -230,9 +232,8 @@ def test_hosted_failure_never_falls_back_to_another_provider() -> None:
         return httpx.Response(200, json={"role": "assistant", "content": []})
 
     async def ollama_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/chat":
-            calls["local-ollama"] += 1
-        return httpx.Response(200, json={"models": []})
+        calls["local-ollama"] += 1
+        raise AssertionError("a hosted-alias chat must never touch the Ollama transport")
 
     config = GatewayConfig.model_validate(_document())
     providers = _mocked_providers(
@@ -262,6 +263,9 @@ def test_missing_credential_fails_only_that_alias(monkeypatch: pytest.MonkeyPatc
     async def openai_handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("no upstream call may happen without a credential")
 
+    async def never_ollama(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("hosted-alias chats must never touch the Ollama transport")
+
     async def anthropic_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -272,14 +276,11 @@ def test_missing_credential_fails_only_that_alias(monkeypatch: pytest.MonkeyPatc
             },
         )
 
-    async def ollama_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"models": []})
-
     config = GatewayConfig.model_validate(_document())
     providers = _mocked_providers(
         config,
         {
-            "local-ollama": ollama_handler,
+            "local-ollama": never_ollama,
             "openai": openai_handler,
             "anthropic": anthropic_handler,
         },

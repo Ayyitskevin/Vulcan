@@ -254,6 +254,8 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        # "exception_type" (not "exception_class") because the formatter owns
+        # the reserved exception_class slot and would silently drop this key.
         logger.error(
             "internal_error",
             extra={
@@ -261,7 +263,7 @@ def create_app(
                     "request_id": _request_id(request),
                     "method": request.method,
                     "route": _route_name(request),
-                    "exception_class": type(exc).__name__,
+                    "exception_type": type(exc).__name__,
                 }
             },
         )

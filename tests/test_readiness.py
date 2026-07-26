@@ -480,7 +480,7 @@ def test_readiness_reuses_probe_within_ttl_and_reprobes_after() -> None:
     first = asyncio.run(gateway.readiness())
     second = asyncio.run(gateway.readiness())
     assert provider.discover_calls == 1
-    assert first is second  # same cached report object within TTL
+    assert first == second  # same cached probe reused within TTL
 
     clock.advance(READINESS_PROBE_TTL_SECONDS - 0.001)
     asyncio.run(gateway.readiness())
@@ -489,7 +489,7 @@ def test_readiness_reuses_probe_within_ttl_and_reprobes_after() -> None:
     clock.advance(0.002)
     third = asyncio.run(gateway.readiness())
     assert provider.discover_calls == 2
-    assert third is not first
+    assert third == first  # same inventory, freshly probed
 
     # force always probes even inside the bound
     asyncio.run(gateway.readiness(force=True))
@@ -754,3 +754,162 @@ def test_api_models_tagged_runtime_match_is_available() -> None:
     by_id = {row["id"]: row["availability"] for row in body["data"]}
     assert by_id == {"public-chat": "available", "public-ambiguous": "available"}
     assert "llama3" not in body  # runtime names never leaked as model ids
+
+
+def test_probe_slower_than_ttl_still_gets_a_full_reuse_window() -> None:
+    """Expiry must be computed after the probe returns, not before it starts."""
+
+    clock = _CountingClock(start=100.0)
+
+    class SlowProvider:
+        provider_type: Literal["ollama"] = "ollama"
+        provider_id = PROVIDER_ID
+
+        def __init__(self) -> None:
+            self.discover_calls = 0
+
+        async def discover_runtime(self) -> RuntimeProbe:
+            self.discover_calls += 1
+            # The probe itself outlasts the TTL (hung daemon, slow disk...).
+            clock.advance(READINESS_PROBE_TTL_SECONDS + 1.0)
+            return RuntimeProbe(
+                live=True,
+                provider_availability="available",
+                runtime_names=frozenset({"runtime-chat"}),
+            )
+
+        async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
+            del request
+            return ProviderChatResult(content="ok", finish_reason="stop")
+
+        async def aclose(self) -> None:
+            return None
+
+    provider = SlowProvider()
+    gateway = Gateway(
+        _single_model_registry(),
+        {PROVIDER_ID: provider},
+        clock=clock,
+        readiness_ttl_seconds=READINESS_PROBE_TTL_SECONDS,
+    )
+
+    asyncio.run(gateway.readiness())
+    asyncio.run(gateway.readiness())
+    assert provider.discover_calls == 1  # second call reuses despite the slow probe
+
+
+def test_chat_probes_only_the_routed_provider() -> None:
+    """A chat must never pay probe latency for providers it does not use."""
+
+    routed = _LiveInventoryProvider(frozenset({"runtime-chat"}), provider_id="routed")
+
+    class MustNotProbe:
+        provider_type: Literal["ollama"] = "ollama"
+        provider_id = "unrelated"
+
+        async def discover_runtime(self) -> RuntimeProbe:
+            raise AssertionError("unrelated providers must not be probed during chat")
+
+        async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
+            raise AssertionError("unrelated providers must not receive chat traffic")
+
+        async def aclose(self) -> None:
+            return None
+
+    registry = ModelRegistry(
+        (
+            ModelConfig(
+                id="public-chat",
+                provider="routed",
+                provider_model="runtime-chat",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+            ModelConfig(
+                id="other-chat",
+                provider="unrelated",
+                provider_model="other-runtime",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+        )
+    )
+    gateway = Gateway(registry, {"routed": routed, "unrelated": MustNotProbe()})
+
+    response = asyncio.run(
+        gateway.chat(
+            ChatCompletionRequest(
+                model="public-chat",
+                messages=(ChatMessage(role=MessageRole.USER, content="hello"),),
+            )
+        )
+    )
+
+    assert response.provider == "routed"
+    assert routed.discover_calls == 1
+    assert len(routed.chat_calls) == 1
+
+
+def test_model_unavailable_invalidates_only_that_providers_probe() -> None:
+    """A failure on one provider must not discard another provider's cache."""
+
+    healthy = _LiveInventoryProvider(frozenset({"other-runtime"}), provider_id="healthy")
+
+    class AlwaysMissing:
+        provider_type: Literal["ollama"] = "ollama"
+        provider_id = "failing"
+
+        def __init__(self) -> None:
+            self.discover_calls = 0
+
+        async def discover_runtime(self) -> RuntimeProbe:
+            self.discover_calls += 1
+            return RuntimeProbe(
+                live=True,
+                provider_availability="available",
+                runtime_names=frozenset({"present-runtime"}),
+            )
+
+        async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
+            del request
+            raise ModelUnavailableError("failing-chat")
+
+        async def aclose(self) -> None:
+            return None
+
+    failing = AlwaysMissing()
+    registry = ModelRegistry(
+        (
+            ModelConfig(
+                id="failing-chat",
+                provider="failing",
+                provider_model="present-runtime",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+            ModelConfig(
+                id="healthy-chat",
+                provider="healthy",
+                provider_model="other-runtime",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+        )
+    )
+    gateway = Gateway(registry, {"failing": failing, "healthy": healthy})
+
+    # Warm both providers' probes via the aggregate surface.
+    asyncio.run(gateway.readiness())
+    assert failing.discover_calls == 1
+    assert healthy.discover_calls == 1
+
+    with pytest.raises(ModelUnavailableError):
+        asyncio.run(
+            gateway.chat(
+                ChatCompletionRequest(
+                    model="failing-chat",
+                    messages=(ChatMessage(role=MessageRole.USER, content="hello"),),
+                )
+            )
+        )
+
+    # Next aggregate readiness re-probes only the invalidated provider.
+    asyncio.run(gateway.readiness())
+    assert failing.discover_calls == 2
+    assert healthy.discover_calls == 1

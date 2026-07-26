@@ -658,3 +658,12 @@ def test_unexpected_provider_failure_is_sanitized_at_the_http_boundary(
     assert PROMPT_SENTINEL not in response.text
     assert exception_sentinel not in caplog.text
     assert PROMPT_SENTINEL not in caplog.text
+    # The safe diagnostic survives: the class name is logged (under a key the
+    # formatter does not reserve or redact), never the exception message.
+    internal_records = [record for record in caplog.records if record.msg == "internal_error"]
+    assert internal_records
+    metadata = internal_records[0].metadata  # type: ignore[attr-defined]
+    assert metadata["exception_type"] == "RuntimeError"
+    from vulcan.observability import redact_metadata
+
+    assert redact_metadata(metadata)["exception_type"] == "RuntimeError"

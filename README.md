@@ -263,10 +263,12 @@ duplicate charges.
 
 ## Readiness semantics
 
-Ollama providers are probed via `/api/tags` and one result is reused for
-`[readiness].probe_ttl_seconds` (default 5s, max 60, 0 = never reuse) across
-health, models, model retrieve, and chat preflight. Operators may force a
-re-probe with `?refresh=true`. Safe operational logs emit `readiness_probed` /
+Ollama providers are probed via `/api/tags` and each provider's result is
+reused for `[readiness].probe_ttl_seconds` (default 5s, max 60, 0 = never
+reuse) across health, models, model retrieve, and chat preflight. Chat
+preflight probes only the provider the alias routes to — hosted and
+deterministic aliases never wait on a local runtime probe. Operators may
+force a re-probe with `?refresh=true`. Safe operational logs emit `readiness_probed` /
 `readiness_reused` with counts only (no native model names). A configured model is
 available when its `provider_model` matches a live name exactly, or (untagged
 config only) matches exactly one `name:tag` live entry; multi-tag collisions stay

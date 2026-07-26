@@ -119,6 +119,7 @@ capabilities = ["chat"]
             listener = _assert_loopback_listener(port)
             health_status, health = _request(opener, f"{base_url}/healthz")
             models_status, models = _request(opener, f"{base_url}/v1/models")
+            model_status, model = _request(opener, f"{base_url}/v1/models/vulcan-smoke")
             capabilities_status, capabilities = _request(opener, f"{base_url}/v1/capabilities")
             chat_status, chat = _request(
                 opener,
@@ -128,7 +129,8 @@ capabilities = ["chat"]
                     "messages": [{"role": "user", "content": PROMPT_SENTINEL}],
                 },
             )
-            assert health_status == models_status == capabilities_status == chat_status == 200
+            statuses = (health_status, models_status, model_status, capabilities_status)
+            assert statuses == (200, 200, 200, 200) and chat_status == 200
             assert health["providers"] == [
                 {"id": "smoke", "type": "deterministic", "availability": "available"}
             ]
@@ -137,6 +139,9 @@ capabilities = ["chat"]
             assert models["data"][0]["provider"] == "smoke"
             assert models["data"][0]["provider_type"] == "deterministic"
             assert models["data"][0]["availability"] == "available"
+            assert model["id"] == "vulcan-smoke"
+            assert model["provider"] == "smoke"
+            assert model["availability"] == "available"
             assert capabilities["chat_completions"]["streaming"] is False
             assert chat["choices"][0]["message"]["content"] == RESPONSE_SENTINEL
         finally:
@@ -162,6 +167,7 @@ capabilities = ["chat"]
                 "statuses": {
                     "healthz": health_status,
                     "models": models_status,
+                    "model_retrieve": model_status,
                     "capabilities": capabilities_status,
                     "chat_completions": chat_status,
                 },

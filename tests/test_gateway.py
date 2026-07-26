@@ -219,6 +219,9 @@ def test_gateway_routes_each_alias_to_exactly_its_configured_provider() -> None:
     assert response.choices[0].message.content == "from beta"
     assert [call.provider_model for call in beta.calls] == ["native-beta"]
     assert alpha.calls == []
+    # Preflight probes only the routed provider; the other is untouched.
+    assert beta.discover_calls == 1
+    assert alpha.discover_calls == 0
 
     response = asyncio.run(gateway.chat(_request(model="alias-alpha")))
     assert response.provider == "alpha"

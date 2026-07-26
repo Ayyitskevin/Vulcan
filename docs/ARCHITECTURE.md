@@ -150,13 +150,18 @@ Key rules:
   most one upstream chat call per client request, so it can never create
   duplicate charges.
 - **Readiness stays honest and free.** Ollama providers are probed via
-  `/api/tags` (TTL-cached, `?refresh=true` supported) exactly as in v1.
-  Hosted providers are reported as `unchecked` — configured but deliberately
-  unprobed, because probing would call authenticated/billable endpoints just
-  to render `/healthz`. A hosted model's availability is learned only when a
-  real request uses it. The deterministic provider remains `available`
-  in-process. Chat preflight still short-circuits (`model_unavailable`) only
-  when a *live* Ollama inventory proved the native name absent.
+  `/api/tags` (TTL-cached per provider, `?refresh=true` supported) exactly as
+  in v1. Hosted providers are reported as `unchecked` — configured but
+  deliberately unprobed, because probing would call authenticated/billable
+  endpoints just to render `/healthz`. A hosted model's availability is
+  learned only when a real request uses it. The deterministic provider
+  remains `available` in-process. Chat preflight probes **only the routed
+  provider** (a no-op for hosted/deterministic types), so a hung local
+  runtime can never stall requests routed elsewhere, and it short-circuits
+  (`model_unavailable`) only when a *live* Ollama inventory proved the native
+  name absent. Probe reuse windows are computed from probe *completion* (a
+  probe slower than the TTL still earns one full window), and a
+  `model_unavailable` outcome invalidates only that provider's cached probe.
 - `/healthz` reports one entry per configured provider (`id`, `type`,
   `availability`); `/v1/models` and `/v1/chat/completions` report the selected
   provider ID per model/request.
@@ -175,7 +180,7 @@ for classification but never surfaced. Additions in v2:
 | `provider_timeout` | 504 | yes | The finite configured timeout expired. |
 | `model_unavailable` | 503 | no | Upstream 404 (unknown native model), or a live Ollama list proved absence. |
 | `provider_protocol_error` | 502 | no | Malformed/incomplete upstream payload. |
-| `provider_error` | 502 | varies | Any other upstream non-success (5xx retryable, 4xx not). |
+| `provider_error` | 502 | varies | Any other upstream non-success (5xx and 408 retryable, other 4xx not). |
 
 Provider-side errors carry `details.provider` (the safe configured ID) so a
 multi-provider operator can tell which upstream failed.
