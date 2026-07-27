@@ -313,6 +313,14 @@ multi-provider operator can tell which upstream failed.
 - Unknown response fields are ignored (vendors extend the shape freely);
   type violations on required fields are protocol errors, matching the
   strictness of the v1 Ollama adapter.
+- Reasoning fields (DeepSeek `reasoning_content`, buffered and streamed) fall
+  under that ignore rule, with three consequences worth stating: they are never
+  forwarded to a client, never used in place of a missing `content` (that stays
+  a protocol error), and their token breakdown in
+  `usage.completion_tokens_details` is never added to `completion_tokens`.
+  A reasoning-phase stream chunk carries `content: null`, so a stream can
+  legitimately yield no text before `finish_reason`. Surfacing reasoning would
+  be a contract change with its own privacy review, not a parser change.
 
 **Ollama** keeps its v1 adapter behavior byte-for-byte on the wire (chat
 payload, `/api/tags` probing, tagged-name matching, 404 classification).

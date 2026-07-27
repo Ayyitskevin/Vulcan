@@ -262,6 +262,29 @@ data: {"error":{"code":"provider_protocol_error","message":"The selected provide
 Clients that disconnect mid-stream cancel the upstream request; Vulcan closes the
 provider response rather than draining it.
 
+### Vendor extension fields (including reasoning content)
+
+OpenAI-compatible vendors extend the response shape freely, so Vulcan ignores
+fields outside the documented contract instead of failing on them. The fields it
+does rely on are still parsed strictly and never coerced.
+
+The notable case is **DeepSeek's `reasoning_content`**, which carries a reasoner
+model's chain of thought alongside the answer. Vulcan drops it:
+
+- It is never forwarded — neither in `choices[].message` nor in a stream
+  `delta`. During the reasoning phase DeepSeek sends chunks whose `content` is
+  null; those produce no `delta.content` frames, so a stream may legitimately
+  contain no text before `finish_reason`.
+- It is never substituted for the answer. A response whose `content` is missing
+  or not a string is a `provider_protocol_error`, even when reasoning is present.
+- Its tokens are not added to usage. `usage.completion_tokens` is authoritative;
+  the `completion_tokens_details.reasoning_tokens` breakdown is ignored, so
+  reasoning tokens are counted once, not twice.
+
+Exposing reasoning content would need a deliberate contract change (a new
+response field and its own privacy review), not a parser tweak. `tests/test_reasoning_content.py`
+pins the current behavior.
+
 ### Embeddings
 
 `POST /v1/embeddings` embeds one batch through the alias's configured provider.
