@@ -158,6 +158,7 @@ capabilities = ["chat", "embeddings"]
                 f"{base_url}/v1/embeddings",
                 payload={"model": "vulcan-smoke", "input": [PROMPT_SENTINEL, "second input"]},
             )
+            usage_before_status, usage_before = _request(opener, f"{base_url}/v1/usage")
             stream_status, stream_content_type, stream_body = _stream(
                 opener,
                 f"{base_url}/v1/chat/completions",
@@ -191,6 +192,25 @@ capabilities = ["chat", "embeddings"]
             ]
             assert all(chunk["object"] == "chat.completion.chunk" for chunk in stream_chunks)
             assert all(chunk["provider"] == "smoke" for chunk in stream_chunks)
+            usage_status, usage = _request(opener, f"{base_url}/v1/usage")
+            assert usage_before_status == usage_status == 200
+            # One buffered chat + one embeddings call happened before the
+            # snapshot above; the stream is counted only in the later one.
+            assert usage_before["totals"]["requests"] == 2
+            assert usage["totals"]["requests"] == 3
+            assert usage["scope"] == "process"
+            assert usage["by_provider"] == [
+                {
+                    "provider": "smoke",
+                    "totals": {
+                        "requests": 3,
+                        "requests_with_usage": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                }
+            ]
             assert health["providers"] == [
                 {"id": "smoke", "type": "deterministic", "availability": "available"}
             ]
@@ -232,7 +252,9 @@ capabilities = ["chat", "embeddings"]
                     "chat_completions": chat_status,
                     "chat_completions_stream": stream_status,
                     "embeddings": embeddings_status,
+                    "usage": usage_status,
                 },
+                "usage_verified": True,
                 "embeddings_verified": True,
                 "stream_verified": True,
                 "chat_response_verified": True,

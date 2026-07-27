@@ -242,6 +242,26 @@ paths; only the payload differs.
   `["chat", "embeddings"]` and an `embeddings` block carrying the input bounds.
   Startup still requires at least one chat-capable model.
 
+## Usage counters (added after v2)
+
+`GET /v1/usage` exposes an in-memory `UsageRecorder` held by the gateway:
+counts of completed requests plus the token counts upstreams reported, keyed
+by public alias and configured provider ID.
+
+- **Recorded on success only.** Chat (buffered and streaming) and embeddings
+  record after the response is fully assembled; a failure records nothing,
+  because Vulcan cannot know whether a failed upstream call consumed tokens.
+- **`requests_with_usage` is the honesty field.** Upstreams that omit token
+  counts contribute a request and zero tokens, so token totals are only
+  interpretable against that counter. Embeddings contribute prompt tokens only
+  (there are no completion tokens).
+- **Process-scoped, never persisted.** Counters reset on restart, carry no
+  costs or currencies, and are exposed only over the loopback API. Aliases and
+  provider IDs are already public metadata; no prompt, native model name, or
+  credential is involved.
+- **No locking needed.** Increments happen on one event loop with no await
+  between read and write.
+
 ## Error normalization
 
 All upstream failures map to stable Vulcan codes; upstream bodies are parsed
@@ -321,6 +341,7 @@ explicitly. The README carries the operator-facing step-by-step guide.
 - Tools, images, agents, and any UI.
 - Retries/backoff (risk of duplicate charges), circuit breakers, fallback
   chains, load balancing, and “best model” selection.
+- Cost or price computation, quotas, and persisted usage history.
 - Hosted-provider readiness probing (billable), model catalogue discovery,
   and credential storage of any kind.
 - Per-vendor adapters or vendor-specific request extensions (e.g. DeepSeek

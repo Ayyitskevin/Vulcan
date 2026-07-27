@@ -183,6 +183,7 @@ disabled.
 | `GET` | `/v1/capabilities` | Callable v1 gateway features: chat (buffered and streaming), embeddings and their bounds, supported roles, and configuration-driven discovery. |
 | `POST` | `/v1/chat/completions` | One selected-alias chat request routed to exactly one provider; buffered JSON by default, Server-Sent Events when `stream: true`. |
 | `POST` | `/v1/embeddings` | One selected-alias embedding batch routed to exactly one provider. |
+| `GET` | `/v1/usage` | In-memory, process-lifetime counters for completed requests, per alias and per provider. |
 
 Chat request fields:
 
@@ -302,6 +303,44 @@ leaving an alias that could only fail at request time. Vectors must be finite
 numbers: a non-finite value from an upstream is a `provider_protocol_error`, as
 is a response whose vector count does not match the input count.
 
+### Usage counters
+
+`GET /v1/usage` reports what this process has served since it started: completed
+request counts and the token counts upstreams actually reported, broken down by
+public alias and by provider.
+
+```json
+{
+  "object": "usage",
+  "scope": "process",
+  "started_at": 1784550000,
+  "totals": {
+    "requests": 12,
+    "requests_with_usage": 9,
+    "prompt_tokens": 4210,
+    "completion_tokens": 880,
+    "total_tokens": 5090
+  },
+  "by_model": [
+    {"model": "local-chat", "provider": "local-ollama", "totals": {"...": 0}}
+  ],
+  "by_provider": [
+    {"provider": "local-ollama", "totals": {"...": 0}}
+  ]
+}
+```
+
+Deliberate limits, so this stays infrastructure rather than a billing system:
+
+- **In-memory and process-scoped.** Counters reset on restart; nothing is
+  persisted anywhere.
+- **Completed requests only.** A failed request is never counted as usage —
+  Vulcan cannot know whether a failed upstream call consumed tokens.
+- **No invented tokens.** Providers that omit token counts contribute a request
+  but no tokens, so `requests_with_usage` is what makes the token totals
+  interpretable. Embeddings report prompt tokens only.
+- **No costs, prices, or currencies.**
+
 All request failures use the same envelope and include a generated `X-Request-ID`
 response header. Validation details contain only field paths and reason codes;
 request values and provider bodies are never echoed. Provider-side failures carry
@@ -389,7 +428,7 @@ live inventory; hosted providers always report `unchecked` without any probe.
 
 ## What Vulcan does not do
 
-No auth layer, multi-user state, telemetry, billing, quota tracking, model
+No auth layer, multi-user state, telemetry, billing, cost tracking, quotas, model
 management or downloads, tools, images, agents,
 UI, deployment tooling, retries, fallback, or credential storage. Hosted providers
 are never probed for health or model catalogues; a hosted model's availability is

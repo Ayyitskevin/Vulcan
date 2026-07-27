@@ -40,9 +40,14 @@ from vulcan.schemas import (
     HealthResponse,
     ModelListResponse,
     ModelRecord,
+    ModelUsageRecord,
     ProviderStatus,
+    ProviderUsageRecord,
+    UsageResponse,
+    UsageTotalsRecord,
     ValidationIssue,
 )
+from vulcan.usage import UsageTotals
 
 logger = logging.getLogger("vulcan.api")
 
@@ -172,6 +177,16 @@ def _error_frame(exc: VulcanError, request_id: str) -> str:
     return _sse_frame({"error": body.model_dump(mode="json"), "request_id": request_id})
 
 
+def _usage_totals(totals: UsageTotals) -> UsageTotalsRecord:
+    return UsageTotalsRecord(
+        requests=totals.requests,
+        requests_with_usage=totals.requests_with_usage,
+        prompt_tokens=totals.prompt_tokens,
+        completion_tokens=totals.completion_tokens,
+        total_tokens=totals.total_tokens,
+    )
+
+
 def create_app(
     config: GatewayConfig,
     *,
@@ -188,6 +203,7 @@ def create_app(
     if id_factory is not None:
         gateway_kwargs["id_factory"] = id_factory
     gateway = Gateway(registry, selected_providers, **gateway_kwargs)
+    started_at = int(clock())
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -431,5 +447,32 @@ def create_app(
     )
     async def embeddings(payload: EmbeddingsRequest, request: Request) -> EmbeddingsResponse:
         return await gateway.embed(payload, request_id=_request_id(request))
+
+    @app.get("/v1/usage", response_model=UsageResponse, responses=ERROR_RESPONSES)
+    async def usage() -> UsageResponse:
+        """Process-lifetime counters for completed requests.
+
+        In-memory only: these reset when the gateway restarts, and they carry
+        no costs or currencies. Token totals cover only the requests whose
+        upstream reported counts (``requests_with_usage``).
+        """
+
+        snapshot = gateway.usage_snapshot()
+        return UsageResponse(
+            started_at=started_at,
+            totals=_usage_totals(snapshot.totals),
+            by_model=tuple(
+                ModelUsageRecord(
+                    model=item.model,
+                    provider=item.provider,
+                    totals=_usage_totals(item.totals),
+                )
+                for item in snapshot.by_model
+            ),
+            by_provider=tuple(
+                ProviderUsageRecord(provider=item.provider, totals=_usage_totals(item.totals))
+                for item in snapshot.by_provider
+            ),
+        )
 
     return app

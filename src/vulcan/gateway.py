@@ -48,6 +48,7 @@ from vulcan.schemas import (
     EmbeddingUsage,
     TokenUsage,
 )
+from vulcan.usage import UsageRecorder, UsageSnapshot
 
 logger = logging.getLogger("vulcan.gateway")
 
@@ -71,6 +72,7 @@ class Gateway:
         clock: Callable[[], float] = time.time,
         id_factory: Callable[[], str] = _new_completion_id,
         readiness_ttl_seconds: float = READINESS_PROBE_TTL_SECONDS,
+        usage: UsageRecorder | None = None,
     ) -> None:
         if readiness_ttl_seconds < 0:
             raise ValueError("readiness_ttl_seconds must be non-negative")
@@ -83,6 +85,7 @@ class Gateway:
         self._readiness_ttl_seconds = readiness_ttl_seconds
         self._cached_probes: dict[str, _CachedProbe] = {}
         self._probe_locks: dict[str, asyncio.Lock] = {}
+        self._usage = usage if usage is not None else UsageRecorder()
 
     def _provider_for(self, provider_id: str) -> Provider:
         """Exact routing: the configured provider or a loud configuration error."""
@@ -241,6 +244,12 @@ class Gateway:
                 completion_tokens=result.usage.completion_tokens,
                 total_tokens=result.usage.prompt_tokens + result.usage.completion_tokens,
             )
+        self._usage.record(
+            model=request.model,
+            provider=provider.provider_id,
+            prompt_tokens=usage.prompt_tokens if usage is not None else None,
+            completion_tokens=usage.completion_tokens if usage is not None else None,
+        )
         logger.info(
             "chat_completed",
             extra={"metadata": {**metadata, "output_chars": len(result.content)}},
@@ -393,6 +402,7 @@ class Gateway:
         yield chunk(ChunkDelta(role="assistant"))
 
         output_chars = 0
+        final_usage: TokenUsage | None = None
         try:
             completed = False
             while event is not None:
@@ -402,14 +412,13 @@ class Gateway:
                         yield chunk(ChunkDelta(content=event.text))
                     event = await self._next_event(events)
                     continue
-                usage = None
                 if event.usage is not None:
-                    usage = TokenUsage(
+                    final_usage = TokenUsage(
                         prompt_tokens=event.usage.prompt_tokens,
                         completion_tokens=event.usage.completion_tokens,
                         total_tokens=event.usage.prompt_tokens + event.usage.completion_tokens,
                     )
-                yield chunk(ChunkDelta(), finish_reason=event.finish_reason, usage=usage)
+                yield chunk(ChunkDelta(), finish_reason=event.finish_reason, usage=final_usage)
                 completed = True
                 break
             if not completed:
@@ -425,6 +434,12 @@ class Gateway:
             if aclose is not None:
                 await aclose()
 
+        self._usage.record(
+            model=request.model,
+            provider=provider.provider_id,
+            prompt_tokens=final_usage.prompt_tokens if final_usage is not None else None,
+            completion_tokens=final_usage.completion_tokens if final_usage is not None else None,
+        )
         logger.info(
             "chat_completed",
             extra={"metadata": {**metadata, "output_chars": output_chars}},
@@ -472,6 +487,11 @@ class Gateway:
                 prompt_tokens=result.usage.prompt_tokens,
                 total_tokens=result.usage.total_tokens,
             )
+        self._usage.record(
+            model=request.model,
+            provider=provider.provider_id,
+            prompt_tokens=usage.prompt_tokens if usage is not None else None,
+        )
         logger.info(
             "embeddings_completed",
             extra={
@@ -491,6 +511,11 @@ class Gateway:
             ),
             usage=usage,
         )
+
+    def usage_snapshot(self) -> UsageSnapshot:
+        """Process-lifetime counters for completed requests."""
+
+        return self._usage.snapshot()
 
     @staticmethod
     def _annotate_provider(exc: VulcanError, provider: Provider | None) -> None:
