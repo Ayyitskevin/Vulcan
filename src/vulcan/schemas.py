@@ -219,6 +219,37 @@ class ChatCompletionChunk(StrictSchema):
     usage: TokenUsage | None = None
 
 
+class UsageTotalsRecord(StrictSchema):
+    """Token totals are only interpretable alongside ``requests_with_usage``:
+    upstreams that omit counts contribute a request but no tokens."""
+
+    requests: int = Field(ge=0)
+    requests_with_usage: int = Field(ge=0)
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class ModelUsageRecord(StrictSchema):
+    model: str
+    provider: str = Field(pattern=PROVIDER_ID_PATTERN)
+    totals: UsageTotalsRecord
+
+
+class ProviderUsageRecord(StrictSchema):
+    provider: str = Field(pattern=PROVIDER_ID_PATTERN)
+    totals: UsageTotalsRecord
+
+
+class UsageResponse(StrictSchema):
+    object: Literal["usage"] = "usage"
+    scope: Literal["process"] = "process"
+    started_at: int = Field(ge=0)
+    totals: UsageTotalsRecord
+    by_model: tuple[ModelUsageRecord, ...]
+    by_provider: tuple[ProviderUsageRecord, ...]
+
+
 class ValidationIssue(StrictSchema):
     path: str
     reason: str

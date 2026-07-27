@@ -261,11 +261,11 @@ actions may call authenticated endpoints; automatic surfaces never do").
 
 Do these only when a session has no higher phase pending, one PR per item:
 
-- **`/v1/usage` (optional).** In-memory, process-lifetime counters only:
-  per alias and per provider — request count, prompt/completion tokens (only
-  when upstreams reported them). No persistence, no costs, no currencies (a
-  billing platform stays out of scope). Strict response schema; document
-  reset-on-restart.
+- ~~**`/v1/usage`**~~ — ✅ DONE. In-memory, process-lifetime counters per alias
+  and per provider, recorded on success only, with `requests_with_usage` making
+  the token totals interpretable. Documented in the README ("Usage counters")
+  and `docs/ARCHITECTURE.md`; covered by `tests/test_usage.py` and
+  `scripts/smoke.py`.
 - **DeepSeek `reasoning_content`:** keep ignoring it; add one test pinning
   that a response carrying it still parses, and a README note.
 - **Dependency bumps:** `uv lock --upgrade` + full gate; pin ranges stay

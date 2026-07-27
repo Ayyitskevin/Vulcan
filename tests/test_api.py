@@ -342,6 +342,7 @@ def test_openapi_contains_only_the_documented_application_routes() -> None:
         "/v1/capabilities": ["get"],
         "/v1/chat/completions": ["post"],
         "/v1/embeddings": ["post"],
+        "/v1/usage": ["get"],
     }
     assert schema["info"]["license"] == {"name": "AGPL-3.0-only"}
     _assert_request_id(response)
