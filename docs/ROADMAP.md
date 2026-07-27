@@ -12,8 +12,8 @@ Read order before any work: `README.md` → `docs/ARCHITECTURE.md` → this file
 
 ## 1. How to work this plan (agent operating instructions)
 
-0. **Next phase: Phase 3 (operator tooling and hardening).** Phases 1 and 2
-   are complete and merged.
+0. **Next phase: Phase 4 (maintenance backlog, as needed).** Phases 1-3 are
+   complete and merged.
 1. **One phase per pull request.** Complete phases strictly in order. Do not
    start phase N+1 in the same PR as phase N. Small preparatory refactors
    belong in the phase PR that needs them.
@@ -223,7 +223,13 @@ green.
 
 ---
 
-## 7. Phase 3 — Operator tooling and hardening
+## 7. Phase 3 — Operator tooling and hardening — ✅ DONE
+
+Shipped: per-provider single-flight probe locks, `vulcan check --verify-credentials`
+(operator-invoked only), and streaming socket-hygiene coverage, all in
+`tests/test_operator_tooling.py`. Documented in the README (credential
+handling) and `docs/ARCHITECTURE.md`. The specification below is retained as
+the design record.
 
 Three small, independent items; one PR.
 

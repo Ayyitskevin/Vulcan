@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from typing import Literal
 
 import httpx
 
@@ -25,6 +26,11 @@ from vulcan.errors import (
 )
 
 _USER_AGENT = f"vulcan/{__version__}"
+
+# Wire-format version of the Anthropic Messages API, not a model choice. It
+# lives here (rather than in the adapter) so credential verification can send
+# it without importing the adapter, which imports this module.
+ANTHROPIC_VERSION = "2023-06-01"
 
 
 def build_client(*, base_url: str, timeout_seconds: float) -> httpx.AsyncClient:
@@ -81,6 +87,57 @@ async def iter_sse_payloads(response: httpx.Response) -> AsyncIterator[str]:
         field = line.rstrip("\r")
         if field.startswith("data:"):
             yield field[len("data:") :].strip()
+
+
+CredentialVerdict = Literal["verified", "auth_failed", "unreachable", "error", "missing"]
+
+
+async def verify_hosted_credential(
+    config: object,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> CredentialVerdict:
+    """Make ONE metadata call to confirm a hosted credential is accepted.
+
+    Operator-invoked only (``vulcan check --verify-credentials``); no automatic
+    surface ever calls this. Returns a verdict derived from the status code
+    alone — the response body is never read, and the credential value never
+    appears in the result.
+    """
+
+    api_key_env = getattr(config, "api_key_env", None)
+    base_url = getattr(config, "base_url", None)
+    timeout_seconds = getattr(config, "timeout_seconds", None)
+    provider_type = getattr(config, "type", None)
+    if api_key_env is None or base_url is None or timeout_seconds is None:
+        return "error"
+    if _usable_credential(api_key_env) is None:
+        return "missing"
+
+    if provider_type == "anthropic":
+        path = "/v1/models"
+        headers = {
+            "x-api-key": resolve_api_key(api_key_env),
+            "anthropic-version": ANTHROPIC_VERSION,
+        }
+    else:
+        path = "/models"
+        headers = {"Authorization": f"Bearer {resolve_api_key(api_key_env)}"}
+
+    verifier = client or build_client(base_url=base_url, timeout_seconds=timeout_seconds)
+    try:
+        response = await verifier.get(path, headers=headers)
+    except httpx.RequestError:
+        # Timeouts are a kind of RequestError: both mean "could not confirm".
+        return "unreachable"
+    finally:
+        await verifier.aclose()
+
+    if response.is_success:
+        return "verified"
+    if response.status_code in {401, 403}:
+        return "auth_failed"
+    return "error"
 
 
 def raise_for_hosted_status(status_code: int) -> None:

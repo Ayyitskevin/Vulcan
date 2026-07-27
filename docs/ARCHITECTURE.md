@@ -110,6 +110,15 @@ Key rules:
   provider, whether the referenced variable is currently set (`present` /
   `missing`) without revealing values. Exit codes: 0 = valid and all
   credentials present, 1 = valid but credentials missing, 2 = invalid config.
+  It performs no network I/O.
+- `vulcan check --verify-credentials` adds one metadata call per hosted
+  provider (`GET {base_url}/models` with Bearer for openai_compatible,
+  `GET {base_url}/v1/models` with `x-api-key` + version header for anthropic)
+  and reports `verified` / `auth_failed` / `unreachable` / `error` / `missing`.
+  Verdicts derive from status codes alone; the body is never read and the
+  credential never appears in output. **Explicit operator actions may call
+  authenticated endpoints; automatic surfaces never do** — health, models, and
+  readiness stay free and unprobed for hosted providers.
 - **Log redaction is unchanged and audited.** The safe JSON formatter renders
   only fixed event names and explicitly supplied metadata, and recursively
   redacts keys containing api-key/authorization/token/prompt/response/body/…
@@ -162,6 +171,9 @@ Key rules:
   name absent. Probe reuse windows are computed from probe *completion* (a
   probe slower than the TTL still earns one full window), and a
   `model_unavailable` outcome invalidates only that provider's cached probe.
+  Probes are single-flight per provider: concurrent requests wait on one
+  in-flight probe and re-check the cache after acquiring the lock, so a
+  burst costs one upstream call rather than one per request.
 - `/healthz` reports one entry per configured provider (`id`, `type`,
   `availability`); `/v1/models` and `/v1/chat/completions` report the selected
   provider ID per model/request.

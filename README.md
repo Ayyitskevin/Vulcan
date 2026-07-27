@@ -3,8 +3,8 @@
 Vulcan is a local-first, single-user AI gateway for explicitly configured local and
 BYOK (bring-your-own-key) models. Same-machine clients get one stable loopback API to
 discover configured model aliases and submit guarded chat requests (buffered or
-streaming) and embedding batches; each alias routes to exactly one named provider — a local Ollama runtime
-or a hosted API used with your own key.
+streaming) and embedding batches; each alias routes to exactly one named provider —
+a local Ollama runtime or a hosted API used with your own key.
 
 Vulcan is infrastructure. It is not a chat UI, agent framework, autonomous router,
 model downloader, training system, credential manager, billing platform, or
@@ -138,7 +138,15 @@ A new OpenAI-compatible vendor needs no application code: add another
 - `uv run vulcan check --config vulcan.toml` validates the file and prints, per
   provider, whether the referenced variable is set (`present`/`missing`) without
   revealing values. Exit codes: 0 = valid + all credentials present, 1 = valid but
-  some missing, 2 = invalid configuration.
+  some missing, 2 = invalid configuration. This makes no network calls.
+- `uv run vulcan check --config vulcan.toml --verify-credentials` additionally
+  makes **one** metadata call per hosted provider to confirm the credential is
+  actually accepted, reporting `verified` / `auth_failed` / `unreachable` /
+  `error` / `missing` per provider. Values and upstream bodies are never printed;
+  verdicts come from status codes alone. Any non-`verified` hosted provider exits
+  1. This is the only place Vulcan calls an authenticated endpoint outside serving
+  a client request, and it happens solely because an operator asked for it —
+  `/healthz`, `/v1/models`, and readiness never do.
 
 ### Migrating from schema v1
 
