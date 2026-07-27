@@ -266,8 +266,11 @@ Do these only when a session has no higher phase pending, one PR per item:
   the token totals interpretable. Documented in the README ("Usage counters")
   and `docs/ARCHITECTURE.md`; covered by `tests/test_usage.py` and
   `scripts/smoke.py`.
-- **DeepSeek `reasoning_content`:** keep ignoring it; add one test pinning
-  that a response carrying it still parses, and a README note.
+- ~~**DeepSeek `reasoning_content`**~~ — ✅ DONE. Still ignored: never
+  forwarded, never substituted for a missing `content`, and its token
+  breakdown never added to usage. Pinned by `tests/test_reasoning_content.py`
+  (buffered, streamed, and over HTTP) and documented in the README
+  ("Vendor extension fields").
 - **Dependency bumps:** `uv lock --upgrade` + full gate; pin ranges stay
   conservative (`<1` / `<3` style).
 - **CI matrix:** add Python 3.13 alongside 3.12 if the gate passes.
