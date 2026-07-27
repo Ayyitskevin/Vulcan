@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Mapping
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -20,6 +20,9 @@ from vulcan.errors import (
 from vulcan.providers.base import (
     ProviderChatRequest,
     ProviderChatResult,
+    ProviderEmbeddingRequest,
+    ProviderEmbeddingResult,
+    ProviderEmbeddingUsage,
     ProviderStreamEvent,
     ProviderTokenUsage,
     StreamDelta,
@@ -74,6 +77,15 @@ def _usage(prompt_eval_count: int | None, eval_count: int | None) -> ProviderTok
     if prompt_eval_count is None or eval_count is None:
         return None
     return ProviderTokenUsage(prompt_tokens=prompt_eval_count, completion_tokens=eval_count)
+
+
+class _OllamaEmbedResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    # allow_inf_nan=False: Python's JSON parser accepts NaN/Infinity, which must
+    # never reach a client as a "vector".
+    embeddings: list[list[Annotated[float, Field(allow_inf_nan=False)]]] = Field(min_length=1)
+    prompt_eval_count: int | None = None
 
 
 class _OllamaTagModel(BaseModel):
@@ -222,6 +234,46 @@ class OllamaProvider:
             await response.aclose()
 
         yield StreamEnd(finish_reason=finish_reason, usage=usage)
+
+    async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:
+        payload: dict[str, Any] = {
+            "model": request.provider_model,
+            "input": list(request.inputs),
+        }
+
+        try:
+            response = await self._client.post("/api/embed", json=payload)
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError from exc
+        except httpx.RequestError as exc:
+            raise ProviderUnavailableError from exc
+
+        if not response.is_success:
+            try:
+                error_body = response.json()
+            except ValueError:
+                error_body = None
+            self._raise_for_status(response.status_code, error_body)
+
+        try:
+            parsed = _OllamaEmbedResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as exc:
+            raise ProviderProtocolError from exc
+
+        usage = None
+        if parsed.prompt_eval_count is not None:
+            if parsed.prompt_eval_count < 0:
+                raise ProviderProtocolError
+            # Embeddings have no completion tokens, so total equals prompt.
+            usage = ProviderEmbeddingUsage(
+                prompt_tokens=parsed.prompt_eval_count,
+                total_tokens=parsed.prompt_eval_count,
+            )
+
+        return ProviderEmbeddingResult(
+            vectors=tuple(tuple(vector) for vector in parsed.embeddings),
+            usage=usage,
+        )
 
     async def discover_runtime(self) -> RuntimeProbe:
         """List installed runtime names via Ollama ``/api/tags`` with finite timeout.

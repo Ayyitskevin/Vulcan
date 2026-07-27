@@ -2,8 +2,8 @@
 
 Vulcan is a local-first, single-user AI gateway for explicitly configured local and
 BYOK (bring-your-own-key) models. Same-machine clients get one stable loopback API to
-discover configured model aliases and submit guarded chat requests, buffered or
-streaming; each alias routes to exactly one named provider — a local Ollama runtime
+discover configured model aliases and submit guarded chat requests (buffered or
+streaming) and embedding batches; each alias routes to exactly one named provider — a local Ollama runtime
 or a hosted API used with your own key.
 
 Vulcan is infrastructure. It is not a chat UI, agent framework, autonomous router,
@@ -42,7 +42,7 @@ endpoints just to render metadata — so their models are reported as configured
 
 The design record for the multi-provider architecture is in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the phased continuation plan
-(embeddings, operator tooling) is in
+(operator tooling and maintenance) is in
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Local setup
@@ -110,7 +110,8 @@ description = "Optional description"
 Provider IDs are operator-chosen, match `[a-z0-9][a-z0-9_-]*`, and appear in API
 metadata and logs (they are safe, non-secret values). Startup requires at least one
 provider, at least one model with the callable `chat` capability, and every
-`models[].provider` to name a configured provider.
+`models[].provider` to name a configured provider. Declare
+`capabilities = ["chat", "embeddings"]` on an alias that should serve both.
 
 ### Adding a provider and model alias
 
@@ -171,8 +172,9 @@ disabled.
 | `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, one entry per configured provider (`id`, `type`, honest `availability`), and model count. Optional `?refresh=true` forces a new probe. |
 | `GET` | `/v1/models` | Configured public aliases only: description, declared capabilities, selected provider ID/type, and readiness annotation. Optional `?refresh=true`. |
 | `GET` | `/v1/models/{id}` | One configured public model with the same annotation; `model_not_found` if the alias is not configured. Optional `?refresh=true`. |
-| `GET` | `/v1/capabilities` | Callable v1 gateway features: chat (buffered and streaming), supported roles, and configuration-driven discovery. |
+| `GET` | `/v1/capabilities` | Callable v1 gateway features: chat (buffered and streaming), embeddings and their bounds, supported roles, and configuration-driven discovery. |
 | `POST` | `/v1/chat/completions` | One selected-alias chat request routed to exactly one provider; buffered JSON by default, Server-Sent Events when `stream: true`. |
+| `POST` | `/v1/embeddings` | One selected-alias embedding batch routed to exactly one provider. |
 
 Chat request fields:
 
@@ -250,6 +252,47 @@ data: {"error":{"code":"provider_protocol_error","message":"The selected provide
 
 Clients that disconnect mid-stream cancel the upstream request; Vulcan closes the
 provider response rather than draining it.
+
+### Embeddings
+
+`POST /v1/embeddings` embeds one batch through the alias's configured provider.
+The alias must declare the `embeddings` capability, otherwise the request fails
+with `unsupported_capability`.
+
+```json
+{
+  "model": "local-embed",
+  "input": ["first document", "second document"]
+}
+```
+
+`input` is one string or 1–64 strings; each is nonblank and at most 8192
+characters, and the combined length is capped at 65536. Unknown fields are
+rejected.
+
+The response returns one record per input, in input order. `usage` appears only
+when the upstream reported token counts; embeddings have no completion tokens, so
+`total_tokens` equals `prompt_tokens` unless the upstream says otherwise.
+
+```json
+{
+  "object": "list",
+  "model": "local-embed",
+  "provider": "local-ollama",
+  "data": [
+    {"object": "embedding", "index": 0, "embedding": [0.01, -0.02]},
+    {"object": "embedding", "index": 1, "embedding": [0.03, -0.04]}
+  ],
+  "usage": {"prompt_tokens": 12, "total_tokens": 12}
+}
+```
+
+Embeddings are supported on `ollama`, `openai_compatible`, and `deterministic`
+providers. **Anthropic publishes no embeddings API**, so declaring the
+`embeddings` capability on an `anthropic` provider fails at startup rather than
+leaving an alias that could only fail at request time. Vectors must be finite
+numbers: a non-finite value from an upstream is a `provider_protocol_error`, as
+is a response whose vector count does not match the input count.
 
 All request failures use the same envelope and include a generated `X-Request-ID`
 response header. Validation details contain only field paths and reason codes;
@@ -339,7 +382,7 @@ live inventory; hosted providers always report `unchecked` without any probe.
 ## What Vulcan does not do
 
 No auth layer, multi-user state, telemetry, billing, quota tracking, model
-management or downloads, tools, images, embeddings endpoints, agents,
+management or downloads, tools, images, agents,
 UI, deployment tooling, retries, fallback, or credential storage. Hosted providers
 are never probed for health or model catalogues; a hosted model's availability is
 learned when a request uses it. A shared SDK should wait until at least two

@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from vulcan.config import PROVIDER_ID_PATTERN, PUBLIC_MODEL_PATTERN, Capability
 
 ProviderType = Literal["ollama", "anthropic", "openai_compatible", "deterministic"]
+
+MAX_EMBEDDING_INPUTS = 64
+MAX_EMBEDDING_INPUT_CHARS = 8192
+MAX_EMBEDDING_COMBINED_CHARS = 65536
+
+StrictText = Annotated[str, Field(strict=True)]
+# Python's JSON parser accepts NaN/Infinity; a vector must never carry one.
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 
 
 class StrictSchema(BaseModel):
@@ -48,6 +56,54 @@ class ChatCompletionRequest(StrictSchema):
         if sum(len(message.content) for message in self.messages) > 65536:
             raise ValueError("combined message content exceeds 65536 characters")
         return self
+
+
+class EmbeddingsRequest(StrictSchema):
+    model: str = Field(strict=True, pattern=PUBLIC_MODEL_PATTERN)
+    input: StrictText | tuple[StrictText, ...]
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The request's inputs as a tuple, whether one string or many."""
+
+        return (self.input,) if isinstance(self.input, str) else self.input
+
+    @model_validator(mode="after")
+    def inputs_must_be_bounded_and_nonblank(self) -> Self:
+        items = self.inputs
+        if not items:
+            raise ValueError("at least one embedding input is required")
+        if len(items) > MAX_EMBEDDING_INPUTS:
+            raise ValueError(f"at most {MAX_EMBEDDING_INPUTS} embedding inputs are allowed")
+        for item in items:
+            if not item.strip():
+                raise ValueError("embedding input must not be blank")
+            if len(item) > MAX_EMBEDDING_INPUT_CHARS:
+                raise ValueError(f"embedding input exceeds {MAX_EMBEDDING_INPUT_CHARS} characters")
+        if sum(len(item) for item in items) > MAX_EMBEDDING_COMBINED_CHARS:
+            raise ValueError(
+                f"combined embedding input exceeds {MAX_EMBEDDING_COMBINED_CHARS} characters"
+            )
+        return self
+
+
+class EmbeddingRecord(StrictSchema):
+    object: Literal["embedding"] = "embedding"
+    index: int = Field(ge=0)
+    embedding: tuple[FiniteFloat, ...]
+
+
+class EmbeddingUsage(StrictSchema):
+    prompt_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class EmbeddingsResponse(StrictSchema):
+    object: Literal["list"] = "list"
+    model: str
+    provider: str = Field(pattern=PROVIDER_ID_PATTERN)
+    data: tuple[EmbeddingRecord, ...]
+    usage: EmbeddingUsage | None = None
 
 
 Availability = Literal["available", "unavailable", "unchecked"]
@@ -99,11 +155,18 @@ class ChatCapability(StrictSchema):
     )
 
 
+class EmbeddingsCapability(StrictSchema):
+    supported: Literal[True] = True
+    max_inputs: int = MAX_EMBEDDING_INPUTS
+    max_input_characters: int = MAX_EMBEDDING_INPUT_CHARS
+
+
 class CapabilitiesResponse(StrictSchema):
     api_version: Literal["v1"] = "v1"
     model_discovery: Literal["configuration"] = "configuration"
-    callable_capabilities: tuple[Capability, ...] = (Capability.CHAT,)
+    callable_capabilities: tuple[Capability, ...] = (Capability.CHAT, Capability.EMBEDDINGS)
     chat_completions: ChatCapability = Field(default_factory=ChatCapability)
+    embeddings: EmbeddingsCapability = Field(default_factory=EmbeddingsCapability)
 
 
 class AssistantMessage(StrictSchema):

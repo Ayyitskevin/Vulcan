@@ -33,6 +33,8 @@ from vulcan.errors import (
 from vulcan.providers.base import (
     ProviderChatRequest,
     ProviderChatResult,
+    ProviderEmbeddingRequest,
+    ProviderEmbeddingResult,
     ProviderStreamEvent,
     ProviderTokenUsage,
     StreamDelta,
@@ -308,6 +310,17 @@ class AnthropicProvider:
             finish_reason=finish_reason,
             usage=_usage(_AnthropicUsage(input_tokens=input_tokens, output_tokens=output_tokens)),
         )
+
+    async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:
+        """Anthropic publishes no embeddings API.
+
+        Configuration rejects an embeddings-capable model on an anthropic
+        provider at startup, so this is defence in depth rather than a
+        reachable request path.
+        """
+
+        del request
+        raise UnsupportedCapabilityError("embeddings")
 
     async def discover_runtime(self) -> RuntimeProbe:
         """Hosted models stay honestly unchecked until a real request uses them."""

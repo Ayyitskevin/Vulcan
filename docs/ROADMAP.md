@@ -12,7 +12,8 @@ Read order before any work: `README.md` → `docs/ARCHITECTURE.md` → this file
 
 ## 1. How to work this plan (agent operating instructions)
 
-0. **Next phase: Phase 2 (embeddings).** Phase 1 is complete and merged.
+0. **Next phase: Phase 3 (operator tooling and hardening).** Phases 1 and 2
+   are complete and merged.
 1. **One phase per pull request.** Complete phases strictly in order. Do not
    start phase N+1 in the same PR as phase N. Small preparatory refactors
    belong in the phase PR that needs them.
@@ -169,7 +170,14 @@ Add to the `Provider` protocol:
 
 ---
 
-## 6. Phase 2 — Embeddings endpoint
+## 6. Phase 2 — Embeddings endpoint — ✅ DONE
+
+Shipped: `POST /v1/embeddings` on ollama/openai_compatible/deterministic,
+config-time rejection of embeddings on anthropic providers, finite-vector
+and ordering validation, and coverage in `tests/test_embeddings.py` plus
+`scripts/smoke.py`. The contract as built is documented in the README
+("Embeddings") and `docs/ARCHITECTURE.md` ("Embeddings (added after v2)").
+The specification below is retained as the design record.
 
 **Why:** `Capability.EMBEDDINGS` already exists in config but is not
 callable; local RAG tools need it.

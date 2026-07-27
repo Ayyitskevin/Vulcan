@@ -20,6 +20,7 @@ from vulcan.errors import (
 from vulcan.providers.base import (
     Provider,
     ProviderChatRequest,
+    ProviderEmbeddingRequest,
     ProviderMessage,
     ProviderStreamEvent,
     StreamDelta,
@@ -40,6 +41,10 @@ from vulcan.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChunkDelta,
+    EmbeddingRecord,
+    EmbeddingsRequest,
+    EmbeddingsResponse,
+    EmbeddingUsage,
     TokenUsage,
 )
 
@@ -248,12 +253,8 @@ class Gateway:
         metadata["provider_type"] = provider.provider_type
         return model, provider
 
-    async def _preflight(
-        self,
-        model: ConfiguredModel,
-        request: ChatCompletionRequest,
-    ) -> ProviderChatRequest:
-        """Probe ONLY the routed provider and translate the request.
+    async def _assert_model_available(self, model: ConfiguredModel) -> None:
+        """Probe ONLY the routed provider before spending an upstream call.
 
         Short-circuits solely when a live inventory proved the native model
         absent; unchecked or unreachable providers fall through so the adapter
@@ -263,6 +264,15 @@ class Gateway:
         probe, _ = await self._probe_provider(model.provider_id)
         if self._known_unavailable(probe, model.provider_model):
             raise ModelUnavailableError(model.id)
+
+    async def _preflight(
+        self,
+        model: ConfiguredModel,
+        request: ChatCompletionRequest,
+    ) -> ProviderChatRequest:
+        """Probe the routed provider and translate the chat request."""
+
+        await self._assert_model_available(model)
         return ProviderChatRequest(
             provider_model=model.provider_model,
             messages=tuple(
@@ -273,11 +283,13 @@ class Gateway:
             max_tokens=request.max_tokens,
         )
 
-    def _handle_chat_failure(
+    def _handle_failure(
         self,
         exc: VulcanError,
         provider: Provider | None,
         metadata: dict[str, object],
+        *,
+        event: str,
     ) -> None:
         """Annotate, invalidate stale inventory, and log one safe failure event."""
 
@@ -286,7 +298,15 @@ class Gateway:
             # so its next probe is fresh, without touching other providers.
             self.invalidate_readiness(provider.provider_id)
         self._annotate_provider(exc, provider)
-        logger.warning("chat_failed", extra={"metadata": {**metadata, "error_code": exc.code}})
+        logger.warning(event, extra={"metadata": {**metadata, "error_code": exc.code}})
+
+    def _handle_chat_failure(
+        self,
+        exc: VulcanError,
+        provider: Provider | None,
+        metadata: dict[str, object],
+    ) -> None:
+        self._handle_failure(exc, provider, metadata, event="chat_failed")
 
     @staticmethod
     async def _next_event(
@@ -389,6 +409,68 @@ class Gateway:
         logger.info(
             "chat_completed",
             extra={"metadata": {**metadata, "output_chars": output_chars}},
+        )
+
+    async def embed(
+        self,
+        request: EmbeddingsRequest,
+        *,
+        request_id: str | None = None,
+    ) -> EmbeddingsResponse:
+        """Embed one batch of inputs through exactly one configured provider."""
+
+        inputs = request.inputs
+        metadata: dict[str, object] = {
+            "model": request.model,
+            "input_count": len(inputs),
+            "input_chars": sum(len(item) for item in inputs),
+        }
+        if request_id is not None:
+            metadata["request_id"] = request_id
+        provider: Provider | None = None
+        try:
+            model = self.registry.require_capability(request.model, Capability.EMBEDDINGS)
+            provider = self._provider_for(model.provider_id)
+            metadata["provider"] = provider.provider_id
+            metadata["provider_type"] = provider.provider_type
+            await self._assert_model_available(model)
+            result = await provider.embed(
+                ProviderEmbeddingRequest(
+                    provider_model=model.provider_model,
+                    inputs=inputs,
+                )
+            )
+            if len(result.vectors) != len(inputs):
+                # A vector per input, or the client cannot align them at all.
+                raise ProviderProtocolError
+        except VulcanError as exc:
+            self._handle_failure(exc, provider, metadata, event="embeddings_failed")
+            raise
+
+        usage = None
+        if result.usage is not None:
+            usage = EmbeddingUsage(
+                prompt_tokens=result.usage.prompt_tokens,
+                total_tokens=result.usage.total_tokens,
+            )
+        logger.info(
+            "embeddings_completed",
+            extra={
+                "metadata": {
+                    **metadata,
+                    "vector_count": len(result.vectors),
+                    "dimensions": len(result.vectors[0]) if result.vectors else 0,
+                }
+            },
+        )
+        return EmbeddingsResponse(
+            model=request.model,
+            provider=provider.provider_id,
+            data=tuple(
+                EmbeddingRecord(index=index, embedding=vector)
+                for index, vector in enumerate(result.vectors)
+            ),
+            usage=usage,
         )
 
     @staticmethod

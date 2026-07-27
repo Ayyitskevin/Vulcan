@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -25,6 +25,9 @@ from vulcan.errors import (
 from vulcan.providers.base import (
     ProviderChatRequest,
     ProviderChatResult,
+    ProviderEmbeddingRequest,
+    ProviderEmbeddingResult,
+    ProviderEmbeddingUsage,
     ProviderStreamEvent,
     ProviderTokenUsage,
     StreamDelta,
@@ -89,6 +92,29 @@ class _CompatStreamChunk(BaseModel):
     # A usage-only trailer chunk legitimately carries no choices.
     choices: list[_CompatStreamChoice] = Field(default_factory=list)
     usage: _CompatUsage | None = None
+
+
+class _CompatEmbeddingRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    # allow_inf_nan=False: Python's JSON parser accepts NaN/Infinity, which must
+    # never reach a client as a "vector".
+    embedding: list[Annotated[float, Field(allow_inf_nan=False)]]
+    index: int | None = None
+
+
+class _CompatEmbeddingUsage(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    prompt_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+class _CompatEmbeddingsResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    data: list[_CompatEmbeddingRecord] = Field(min_length=1)
+    usage: _CompatEmbeddingUsage | None = None
 
 
 def _finish_reason(value: str | None) -> Literal["stop", "length"] | None:
@@ -236,6 +262,61 @@ class OpenAICompatibleProvider:
             await response.aclose()
 
         yield StreamEnd(finish_reason=finish_reason, usage=usage)
+
+    async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:
+        api_key = resolve_api_key(self._api_key_env)
+        payload: dict[str, Any] = {
+            "model": request.provider_model,
+            "input": list(request.inputs),
+        }
+
+        try:
+            response = await self._client.post(
+                "/embeddings",
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError from exc
+        except httpx.RequestError as exc:
+            raise ProviderUnavailableError from exc
+
+        if not response.is_success:
+            raise_for_hosted_status(response.status_code)
+
+        try:
+            parsed = _CompatEmbeddingsResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as exc:
+            raise ProviderProtocolError from exc
+
+        # Vendors may return records out of order; `index` is authoritative when
+        # present, and must form exactly 0..n-1 so no input is silently dropped.
+        records = parsed.data
+        if any(record.index is not None for record in records):
+            if not all(record.index is not None for record in records):
+                raise ProviderProtocolError
+            if sorted(record.index for record in records) != list(  # type: ignore[misc]
+                range(len(records))
+            ):
+                raise ProviderProtocolError
+            records = sorted(records, key=lambda record: record.index or 0)
+
+        usage = None
+        if parsed.usage is not None and parsed.usage.prompt_tokens is not None:
+            prompt_tokens = parsed.usage.prompt_tokens
+            total_tokens = (
+                parsed.usage.total_tokens
+                if parsed.usage.total_tokens is not None
+                else prompt_tokens
+            )
+            if prompt_tokens < 0 or total_tokens < 0:
+                raise ProviderProtocolError
+            usage = ProviderEmbeddingUsage(prompt_tokens=prompt_tokens, total_tokens=total_tokens)
+
+        return ProviderEmbeddingResult(
+            vectors=tuple(tuple(record.embedding) for record in records),
+            usage=usage,
+        )
 
     async def discover_runtime(self) -> RuntimeProbe:
         """Hosted models stay honestly unchecked until a real request uses them.

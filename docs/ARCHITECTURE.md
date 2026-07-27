@@ -201,6 +201,35 @@ policy, and still issues exactly one upstream call per request.
   Ollama: newline-delimited JSON, terminal `done: true` chunk carries the
   reason and eval counts.
 
+## Embeddings (added after v2)
+
+`POST /v1/embeddings` embeds one bounded batch through the alias's configured
+provider. Routing, preflight, error normalization, and logging mirror the chat
+paths; only the payload differs.
+
+- **Provider boundary.** `Provider.embed()` takes
+  `ProviderEmbeddingRequest(provider_model, inputs)` and returns
+  `ProviderEmbeddingResult(vectors, usage)` with one vector per input, in input
+  order. The gateway rejects a vector/input count mismatch as
+  `provider_protocol_error` rather than returning records a client cannot align.
+- **Ordering.** OpenAI-compatible responses may arrive out of order, so `index`
+  is authoritative when present and must form exactly 0..n-1; a gap, duplicate,
+  or partially-indexed batch is a protocol error. Ollama's `/api/embed` returns
+  vectors in input order.
+- **Finite vectors.** Response models set `allow_inf_nan=False`: Python's JSON
+  parser accepts `NaN`/`Infinity`, and such a value must never reach a client
+  as a "vector".
+- **Usage honesty.** Reported only when the upstream supplies counts.
+  Embeddings have no completion tokens, so `total_tokens` mirrors
+  `prompt_tokens` unless the upstream reports its own total.
+- **Anthropic.** No embeddings API exists, so a model declaring `embeddings` on
+  an anthropic-typed provider is rejected at **config load**
+  (`anthropic_embeddings_unsupported`) rather than at request time. The adapter
+  still raises `unsupported_capability` as defence in depth.
+- **Capabilities.** `/v1/capabilities` reports `callable_capabilities`
+  `["chat", "embeddings"]` and an `embeddings` block carrying the input bounds.
+  Startup still requires at least one chat-capable model.
+
 ## Error normalization
 
 All upstream failures map to stable Vulcan codes; upstream bodies are parsed
@@ -277,7 +306,7 @@ explicitly. The README carries the operator-facing step-by-step guide.
 
 ## Deliberately deferred
 
-- Tools, images, embeddings endpoints, agents, and any UI.
+- Tools, images, agents, and any UI.
 - Retries/backoff (risk of duplicate charges), circuit breakers, fallback
   chains, load balancing, and “best model” selection.
 - Hosted-provider readiness probing (billable), model catalogue discovery,

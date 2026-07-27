@@ -264,10 +264,18 @@ class GatewayConfig(StrictConfigModel):
     @model_validator(mode="after")
     def models_must_reference_configured_providers(self) -> GatewayConfig:
         for model in self.models:
-            if model.provider not in self.providers:
+            provider = self.providers.get(model.provider)
+            if provider is None:
                 raise PydanticCustomError(
                     "unknown_provider_reference",
                     "every model must reference a configured provider ID",
+                )
+            # Anthropic publishes no embeddings API: fail at startup rather than
+            # letting an alias exist that can only ever fail at request time.
+            if provider.type == "anthropic" and Capability.EMBEDDINGS in model.capabilities:
+                raise PydanticCustomError(
+                    "anthropic_embeddings_unsupported",
+                    "anthropic providers do not support the embeddings capability",
                 )
         return self
 

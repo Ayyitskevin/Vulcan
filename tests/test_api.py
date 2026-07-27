@@ -231,11 +231,16 @@ def test_capabilities_state_the_small_callable_contract_exactly() -> None:
     assert response.json() == {
         "api_version": "v1",
         "model_discovery": "configuration",
-        "callable_capabilities": ["chat"],
+        "callable_capabilities": ["chat", "embeddings"],
         "chat_completions": {
             "supported": True,
             "streaming": True,
             "message_roles": ["system", "user", "assistant"],
+        },
+        "embeddings": {
+            "supported": True,
+            "max_inputs": 64,
+            "max_input_characters": 8192,
         },
     }
     _assert_request_id(response)
@@ -336,6 +341,7 @@ def test_openapi_contains_only_the_documented_application_routes() -> None:
         "/v1/models/{model_id}": ["get"],
         "/v1/capabilities": ["get"],
         "/v1/chat/completions": ["post"],
+        "/v1/embeddings": ["post"],
     }
     assert schema["info"]["license"] == {"name": "AGPL-3.0-only"}
     _assert_request_id(response)

@@ -122,7 +122,7 @@ response_text = "{RESPONSE_SENTINEL}"
 id = "vulcan-smoke"
 provider = "smoke"
 provider_model = "vulcan-smoke"
-capabilities = ["chat"]
+capabilities = ["chat", "embeddings"]
 ''',
             encoding="utf-8",
         )
@@ -153,6 +153,11 @@ capabilities = ["chat"]
                 },
             )
             statuses = (health_status, models_status, model_status, capabilities_status)
+            embeddings_status, embeddings = _request(
+                opener,
+                f"{base_url}/v1/embeddings",
+                payload={"model": "vulcan-smoke", "input": [PROMPT_SENTINEL, "second input"]},
+            )
             stream_status, stream_content_type, stream_body = _stream(
                 opener,
                 f"{base_url}/v1/chat/completions",
@@ -163,6 +168,12 @@ capabilities = ["chat"]
                 },
             )
             assert statuses == (200, 200, 200, 200) and chat_status == 200
+            assert embeddings_status == 200
+            assert embeddings["object"] == "list"
+            assert embeddings["provider"] == "smoke"
+            assert [record["index"] for record in embeddings["data"]] == [0, 1]
+            assert all(len(record["embedding"]) == 8 for record in embeddings["data"])
+            assert embeddings["usage"] is None
             assert stream_status == 200
             assert stream_content_type.startswith("text/event-stream")
             stream_frames = _sse_frames(stream_body)
@@ -220,7 +231,9 @@ capabilities = ["chat"]
                     "capabilities": capabilities_status,
                     "chat_completions": chat_status,
                     "chat_completions_stream": stream_status,
+                    "embeddings": embeddings_status,
                 },
+                "embeddings_verified": True,
                 "stream_verified": True,
                 "chat_response_verified": True,
                 "content_absent_from_logs": True,

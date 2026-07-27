@@ -60,6 +60,29 @@ class StreamEnd:
 ProviderStreamEvent = StreamDelta | StreamEnd
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderEmbeddingRequest:
+    provider_model: str
+    inputs: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEmbeddingUsage:
+    """Embeddings have no completion tokens, so total mirrors prompt unless the
+    upstream reports its own total."""
+
+    prompt_tokens: int
+    total_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEmbeddingResult:
+    """One vector per input, in input order."""
+
+    vectors: tuple[tuple[float, ...], ...]
+    usage: ProviderEmbeddingUsage | None = None
+
+
 class Provider(Protocol):
     @property
     def provider_id(self) -> str:
@@ -82,6 +105,9 @@ class Provider(Protocol):
         gateway can still answer with a normal JSON error envelope. Closing
         the returned iterator must release the upstream response.
         """
+
+    async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:
+        """Embed one batch of inputs, returning one vector per input in order."""
 
     async def discover_runtime(self) -> RuntimeProbe:
         """Probe provider readiness without inventing model inventory."""
