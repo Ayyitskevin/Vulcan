@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from collections.abc import Sequence
@@ -12,9 +13,9 @@ from typing import Any
 import uvicorn
 
 from vulcan.api import create_app
-from vulcan.config import ConfigLoadError, GatewayConfig, load_config
+from vulcan.config import HOSTED_PROVIDER_TYPES, ConfigLoadError, GatewayConfig, load_config
 from vulcan.observability import configure_logging
-from vulcan.providers.http import credential_available
+from vulcan.providers.http import credential_available, verify_hosted_credential
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,6 +28,14 @@ def _parser() -> argparse.ArgumentParser:
         help="validate a config and report credential availability without revealing values",
     )
     check.add_argument("--config", type=Path, required=True, help="path to a Vulcan TOML config")
+    check.add_argument(
+        "--verify-credentials",
+        action="store_true",
+        help=(
+            "additionally make one metadata call per hosted provider to confirm the "
+            "credential is accepted (never automatic; values and bodies are never printed)"
+        ),
+    )
     return parser
 
 
@@ -42,8 +51,26 @@ def _write_config_error(exc: ConfigLoadError) -> None:
     sys.stderr.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
 
 
-def _check_report(config: GatewayConfig) -> tuple[dict[str, Any], int]:
-    """Build the safe check report: names and presence only, never values."""
+async def _verify_hosted_credentials(config: GatewayConfig) -> dict[str, str]:
+    """One metadata call per hosted provider; verdicts only, never values."""
+
+    verdicts: dict[str, str] = {}
+    for provider_id, provider in config.providers.items():
+        if provider.type in HOSTED_PROVIDER_TYPES:
+            verdicts[provider_id] = await verify_hosted_credential(provider)
+    return verdicts
+
+
+def _check_report(config: GatewayConfig, *, verify: bool = False) -> tuple[dict[str, Any], int]:
+    """Build the safe check report: names and presence only, never values.
+
+    With ``verify``, each hosted provider is additionally probed once with its
+    configured credential. This is the only place Vulcan calls an authenticated
+    endpoint outside serving a client request, and it happens solely because an
+    operator asked for it.
+    """
+
+    verdicts = asyncio.run(_verify_hosted_credentials(config)) if verify else {}
 
     models_by_provider: dict[str, int] = {}
     for model in config.models:
@@ -51,6 +78,7 @@ def _check_report(config: GatewayConfig) -> tuple[dict[str, Any], int]:
 
     providers: list[dict[str, Any]] = []
     credentials_missing = 0
+    verification_failures = 0
     for provider_id, provider in config.providers.items():
         entry: dict[str, Any] = {
             "id": provider_id,
@@ -64,16 +92,23 @@ def _check_report(config: GatewayConfig) -> tuple[dict[str, Any], int]:
             entry["credential"] = "present" if present else "missing"
             if not present:
                 credentials_missing += 1
+        if provider_id in verdicts:
+            entry["verification"] = verdicts[provider_id]
+            if verdicts[provider_id] != "verified":
+                verification_failures += 1
         providers.append(entry)
 
-    report = {
+    report: dict[str, Any] = {
         "config": "valid",
         "schema_version": config.schema_version,
         "providers": providers,
         "models_configured": len(config.models),
         "credentials_missing": credentials_missing,
     }
-    return report, (1 if credentials_missing else 0)
+    if verify:
+        report["credentials_verified"] = verify
+        report["verification_failures"] = verification_failures
+    return report, (1 if credentials_missing or verification_failures else 0)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -85,7 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if args.command == "check":
-        report, exit_code = _check_report(config)
+        report, exit_code = _check_report(config, verify=args.verify_credentials)
         sys.stdout.write(json.dumps(report, separators=(",", ":"), sort_keys=True) + "\n")
         return exit_code
 

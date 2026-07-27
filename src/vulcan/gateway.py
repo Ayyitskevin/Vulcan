@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -81,6 +82,7 @@ class Gateway:
         self._id_factory = id_factory
         self._readiness_ttl_seconds = readiness_ttl_seconds
         self._cached_probes: dict[str, _CachedProbe] = {}
+        self._probe_locks: dict[str, asyncio.Lock] = {}
 
     def _provider_for(self, provider_id: str) -> Provider:
         """Exact routing: the configured provider or a loud configuration error."""
@@ -91,25 +93,42 @@ class Gateway:
             # Config validation makes this unreachable; fail loud, never fall back.
             raise ConfigurationError(details={"provider": provider_id}) from None
 
+    def _fresh_cached_probe(self, provider_id: str) -> RuntimeProbe | None:
+        cached = self._cached_probes.get(provider_id)
+        if cached is not None and self._clock() < cached.expires_at:
+            return cached.probe
+        return None
+
     async def _probe_provider(
         self, provider_id: str, *, force: bool = False
     ) -> tuple[RuntimeProbe, bool]:
         """One provider's probe, reused within the TTL; returns (probe, reused).
 
-        The expiry is computed *after* the probe completes so a probe slower
-        than the TTL still yields one full reuse window instead of an
+        Single-flight per provider: concurrent callers wait on one probe rather
+        than each opening their own, and re-check the cache after acquiring the
+        lock. The expiry is computed *after* the probe completes so a probe
+        slower than the TTL still yields one full reuse window instead of an
         already-expired entry (which would re-pay the probe on every request).
         """
 
-        cached = self._cached_probes.get(provider_id)
-        if not force and cached is not None and self._clock() < cached.expires_at:
-            return cached.probe, True
-        probe = await self._provider_for(provider_id).discover_runtime()
-        self._cached_probes[provider_id] = _CachedProbe(
-            probe=probe,
-            expires_at=self._clock() + self._readiness_ttl_seconds,
-        )
-        return probe, False
+        if not force:
+            probe = self._fresh_cached_probe(provider_id)
+            if probe is not None:
+                return probe, True
+
+        lock = self._probe_locks.setdefault(provider_id, asyncio.Lock())
+        async with lock:
+            # Another caller may have refreshed this provider while we waited.
+            if not force:
+                probe = self._fresh_cached_probe(provider_id)
+                if probe is not None:
+                    return probe, True
+            probe = await self._provider_for(provider_id).discover_runtime()
+            self._cached_probes[provider_id] = _CachedProbe(
+                probe=probe,
+                expires_at=self._clock() + self._readiness_ttl_seconds,
+            )
+            return probe, False
 
     def _readiness_log_metadata(
         self,

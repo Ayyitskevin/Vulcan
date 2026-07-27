@@ -41,6 +41,7 @@ from vulcan.providers.base import (
     StreamEnd,
 )
 from vulcan.providers.http import (
+    ANTHROPIC_VERSION,
     build_client,
     iter_sse_payloads,
     raise_for_hosted_status,
@@ -48,8 +49,7 @@ from vulcan.providers.http import (
 )
 from vulcan.readiness import RuntimeProbe
 
-# Wire-format version of the Messages API, not a model choice.
-ANTHROPIC_VERSION = "2023-06-01"
+__all__ = ["ANTHROPIC_VERSION", "AnthropicProvider"]
 
 
 class _AnthropicContentBlock(BaseModel):
