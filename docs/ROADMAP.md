@@ -271,8 +271,12 @@ Do these only when a session has no higher phase pending, one PR per item:
   breakdown never added to usage. Pinned by `tests/test_reasoning_content.py`
   (buffered, streamed, and over HTTP) and documented in the README
   ("Vendor extension fields").
-- **Dependency bumps:** `uv lock --upgrade` + full gate; pin ranges stay
-  conservative (`<1` / `<3` style).
+- ~~**Dependency bumps**~~ — ✅ DONE (2026-07). `uv lock --upgrade` moved
+  annotated-types, certifi, fastapi, httpcore2, httpx2, and ruff; no package
+  was added or removed and every bump stayed inside the existing conservative
+  ranges, so `pyproject.toml` is untouched. Repeat the same way: upgrade the
+  lock, run the four-command gate, and only widen a range in `pyproject.toml`
+  when a bump actually needs it.
 - **CI matrix:** add Python 3.13 alongside 3.12 if the gate passes.
 - Keep the suite fast (< ~10s); parallelize only if it grows past that.
 
