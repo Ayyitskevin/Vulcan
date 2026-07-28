@@ -9,17 +9,32 @@ permissions:
 
 jobs:
   quality:
+    name: quality (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      # Report every interpreter: a failure on one version must not cancel the
+      # others, or a version-specific break looks like a total break.
+      fail-fast: false
+      matrix:
+        # 3.12 is the floor declared by requires-python; 3.13 is the newest
+        # version the gate is known to pass on.
+        python-version: ["3.12", "3.13"]
+    env:
+      # Every uv command in this job resolves to the matrix interpreter rather
+      # than whatever discovery happens to find first.
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.28"
           enable-cache: true
       - run: uv sync --all-groups --locked
+      # Makes the log say which interpreter actually ran the gate below.
+      - run: uv run python -VV
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run pytest
