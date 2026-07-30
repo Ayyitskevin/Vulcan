@@ -259,6 +259,12 @@ actions may call authenticated endpoints; automatic surfaces never do").
 
 ## 8. Phase 4 — Maintenance and small conveniences (as-needed backlog)
 
+**Every listed item is done as of 2026-07; the roadmap through Phase 4 is
+complete.** The entries stay here because each one records how to redo that
+kind of work, not just that it happened. A session with nothing else pending
+should default to the standing item at the end rather than inventing scope —
+new features come from the operator, and §9 says what to refuse outright.
+
 Do these only when a session has no higher phase pending, one PR per item:
 
 - ~~**`/v1/usage`**~~ — ✅ DONE. In-memory, process-lifetime counters per alias
@@ -277,7 +283,12 @@ Do these only when a session has no higher phase pending, one PR per item:
   ranges, so `pyproject.toml` is untouched. Repeat the same way: upgrade the
   lock, run the four-command gate, and only widen a range in `pyproject.toml`
   when a bump actually needs it.
-- **CI matrix:** add Python 3.13 alongside 3.12 if the gate passes.
+- ~~**CI matrix**~~ — ✅ DONE (2026-07). `quality` runs on 3.12 and 3.13 with
+  `fail-fast: false`; `UV_PYTHON` pins each leg to its matrix interpreter so a
+  job cannot silently test the wrong one. Verified on a real 3.13 before the
+  matrix was added — lock resolves, ruff and 519 tests pass, smoke green.
+  Add the next version the same way: prove the gate locally first, then widen
+  the matrix.
 - Keep the suite fast (< ~10s); parallelize only if it grows past that.
 
 ## 9. Out of scope until the operator explicitly asks

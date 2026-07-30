@@ -47,8 +47,8 @@ The design record for the multi-provider architecture is in
 
 ## Local setup
 
-Vulcan requires Python 3.12 and [uv](https://docs.astral.sh/uv/). No model runtime is
-installed or downloaded by these commands.
+Vulcan requires Python 3.12 or 3.13 and [uv](https://docs.astral.sh/uv/). No model
+runtime is installed or downloaded by these commands.
 
 ```bash
 uv sync --all-groups --locked
@@ -473,6 +473,10 @@ checks the listener and all endpoints using the deterministic provider, asserts 
 exact chat reply, checks logs for prompt/response sentinels, and shuts the process
 down. Tests exercise hosted providers only through mocked transports; nothing in
 the suite contacts a real API.
+
+CI runs the first four commands on both supported interpreters (3.12 and 3.13)
+from the same lock file, and does not cancel one version's job when the other
+fails.
 
 ## License
 
