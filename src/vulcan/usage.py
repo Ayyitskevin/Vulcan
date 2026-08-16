@@ -278,7 +278,7 @@ class UsageRecorder:
     _ledger: UsageLedger | None = None
 
     @classmethod
-    def with_ledger(cls, ledger: UsageLedger) -> UsageRecorder:
+    def with_ledger(cls, ledger: UsageLedger, *, budget_book=None) -> UsageRecorder:
         """A recorder whose counters start from the ledger and append to it."""
 
         recorder = cls(_ledger=ledger)
@@ -297,6 +297,19 @@ class UsageRecorder:
                 completion_tokens=completion if isinstance(completion, int) else None,
                 seat=seat if isinstance(seat, str) else None,
             )
+            if budget_book is not None:
+                # Replayed spend keeps budgets restart-proof; the book ignores
+                # records from previous UTC days.
+                tokens = (prompt if isinstance(prompt, int) else 0) + (
+                    completion if isinstance(completion, int) else 0
+                )
+                ts = record["ts"]
+                budget_book.spend(
+                    seat=seat if isinstance(seat, str) else None,
+                    provider_id=str(record["provider"]),
+                    tokens=tokens,
+                    ts=float(ts) if isinstance(ts, int) else None,
+                )
 
         ledger.replay(sink)
         return recorder

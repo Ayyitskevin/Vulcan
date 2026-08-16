@@ -19,6 +19,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response, StreamingResponse
 
 from vulcan import __version__
+from vulcan.budgets import BudgetBook, SeatLimits
 from vulcan.config import GatewayConfig
 from vulcan.errors import VulcanError
 from vulcan.gateway import Gateway
@@ -44,6 +45,7 @@ from vulcan.schemas import (
     ModelUsageRecord,
     ProviderStatus,
     ProviderUsageRecord,
+    SeatBudgetRecord,
     SeatUsageRecord,
     UsageResponse,
     UsageTotalsRecord,
@@ -206,12 +208,42 @@ def create_app(
         gateway_kwargs["id_factory"] = id_factory
     usage_scope = "process"
     ledger: UsageLedger | None = None
+    budget_book: BudgetBook | None = None
+    if config.budgets is not None:
+        from vulcan.config import HOSTED_PROVIDER_TYPES
+
+        hosted_ids = frozenset(
+            provider_id
+            for provider_id, provider_config in config.providers.items()
+            if provider_config.type in HOSTED_PROVIDER_TYPES
+        )
+        seat_limits = {
+            name: SeatLimits(
+                hosted_tokens_per_day=entry.hosted_tokens_per_day,
+                hosted_requests_per_day=entry.hosted_requests_per_day,
+            )
+            for name, entry in config.budgets.seats.items()
+            if name != "default"
+        }
+        default_entry = config.budgets.seats.get("default")
+        budget_book = BudgetBook(
+            limits=seat_limits,
+            default=SeatLimits(
+                hosted_tokens_per_day=default_entry.hosted_tokens_per_day,
+                hosted_requests_per_day=default_entry.hosted_requests_per_day,
+            )
+            if default_entry is not None
+            else None,
+            hosted_providers=hosted_ids,
+            clock=clock,
+        )
+        gateway_kwargs["budgets"] = budget_book
     started_at = int(clock())
     if config.usage is not None:
         # Fail-loud by design: an unopenable ledger raises LedgerError here
         # rather than silently degrading to in-memory counters.
         ledger = UsageLedger(config.usage.ledger_path, clock=clock)
-        gateway_kwargs["usage"] = UsageRecorder.with_ledger(ledger)
+        gateway_kwargs["usage"] = UsageRecorder.with_ledger(ledger, budget_book=budget_book)
         usage_scope = "ledger"
         if ledger.stats.earliest_ts is not None:
             started_at = min(started_at, ledger.stats.earliest_ts)
@@ -482,6 +514,19 @@ def create_app(
                 skipped_lines=snapshot.ledger.skipped_lines,
                 write_failures=snapshot.ledger.write_failures,
             )
+        budget_rows = None
+        if budget_book is not None:
+            budget_rows = tuple(
+                SeatBudgetRecord(
+                    seat=row.seat,
+                    hosted_tokens_per_day=row.hosted_tokens_per_day,
+                    hosted_requests_per_day=row.hosted_requests_per_day,
+                    tokens_today=row.tokens_today,
+                    requests_today=row.requests_today,
+                    window_resets_at=row.window_resets_at,
+                )
+                for row in budget_book.snapshot()
+            )
         return UsageResponse(
             scope=usage_scope,  # type: ignore[arg-type]
             started_at=started_at,
@@ -503,6 +548,7 @@ def create_app(
                 for item in snapshot.by_seat
             ),
             ledger=ledger_record,
+            budgets=budget_rows,
         )
 
     return app

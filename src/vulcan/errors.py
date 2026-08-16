@@ -111,6 +111,43 @@ class ProviderProtocolError(VulcanError):
     message = "The selected provider returned an invalid response."
 
 
+class SeatRequiredError(VulcanError):
+    code = "seat_required"
+    status_code = 400
+    message = (
+        "Budgets are enabled, so hosted requests must carry a seat label. "
+        "Add a 'seat' field to the request."
+    )
+
+    def __init__(self, provider_id: str) -> None:
+        super().__init__(details={"provider": provider_id})
+
+
+class BudgetUnconfiguredError(VulcanError):
+    code = "budget_unconfigured"
+    status_code = 403
+    message = (
+        "This seat has no budget entry and budgets are fail-closed. "
+        "Add a [budgets.seats.<seat>] or [budgets.seats.default] entry."
+    )
+
+    def __init__(self, seat: str) -> None:
+        super().__init__(details={"seat": seat})
+
+
+class BudgetExhaustedError(VulcanError):
+    code = "budget_exhausted"
+    status_code = 429
+    retryable = True
+    message = (
+        "This seat's daily hosted budget is exhausted. The caller decides "
+        "what happens next — Vulcan never reroutes to another provider."
+    )
+
+    def __init__(self, seat: str, *, window_resets_at: int) -> None:
+        super().__init__(details={"seat": seat, "window_resets_at": window_resets_at})
+
+
 class ConfigurationError(VulcanError):
     code = "configuration_error"
     status_code = 500

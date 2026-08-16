@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
 
+from vulcan.budgets import BudgetBook
 from vulcan.config import Capability
 from vulcan.errors import (
     ConfigurationError,
@@ -73,6 +74,7 @@ class Gateway:
         id_factory: Callable[[], str] = _new_completion_id,
         readiness_ttl_seconds: float = READINESS_PROBE_TTL_SECONDS,
         usage: UsageRecorder | None = None,
+        budgets: BudgetBook | None = None,
     ) -> None:
         if readiness_ttl_seconds < 0:
             raise ValueError("readiness_ttl_seconds must be non-negative")
@@ -86,6 +88,7 @@ class Gateway:
         self._cached_probes: dict[str, _CachedProbe] = {}
         self._probe_locks: dict[str, asyncio.Lock] = {}
         self._usage = usage if usage is not None else UsageRecorder()
+        self._budgets = budgets
 
     def _provider_for(self, provider_id: str) -> Provider:
         """Exact routing: the configured provider or a loud configuration error."""
@@ -231,6 +234,10 @@ class Gateway:
                 # there. Reaching here would silently buffer a stream instead.
                 raise UnsupportedCapabilityError("streaming", request.model)
             model, provider = self._select_provider(request, metadata)
+            if self._budgets is not None:
+                # Budgets gate BEFORE the upstream call: over-budget requests
+                # are refused loudly, never rerouted (one alias, one provider).
+                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
             provider_request = await self._preflight(model, request)
             result = await provider.chat(provider_request)
         except VulcanError as exc:
@@ -251,6 +258,12 @@ class Gateway:
             completion_tokens=usage.completion_tokens if usage is not None else None,
             seat=request.seat,
         )
+        if self._budgets is not None:
+            self._budgets.spend(
+                seat=request.seat,
+                provider_id=provider.provider_id,
+                tokens=usage.total_tokens if usage is not None else None,
+            )
         logger.info(
             "chat_completed",
             extra={"metadata": {**metadata, "output_chars": len(result.content)}},
@@ -373,6 +386,10 @@ class Gateway:
         provider: Provider | None = None
         try:
             model, provider = self._select_provider(request, metadata)
+            if self._budgets is not None:
+                # Budgets gate BEFORE the upstream call: over-budget requests
+                # are refused loudly, never rerouted (one alias, one provider).
+                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
             provider_request = await self._preflight(model, request)
             events = provider.chat_stream(provider_request).__aiter__()
             # Opening the upstream stream (and classifying its status) happens
@@ -442,6 +459,12 @@ class Gateway:
             completion_tokens=final_usage.completion_tokens if final_usage is not None else None,
             seat=request.seat,
         )
+        if self._budgets is not None:
+            self._budgets.spend(
+                seat=request.seat,
+                provider_id=provider.provider_id,
+                tokens=final_usage.total_tokens if final_usage is not None else None,
+            )
         logger.info(
             "chat_completed",
             extra={"metadata": {**metadata, "output_chars": output_chars}},
@@ -469,6 +492,9 @@ class Gateway:
             provider = self._provider_for(model.provider_id)
             metadata["provider"] = provider.provider_id
             metadata["provider_type"] = provider.provider_type
+            if self._budgets is not None:
+                # Same gate as chat: refused loudly before the upstream call.
+                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
             await self._assert_model_available(model)
             result = await provider.embed(
                 ProviderEmbeddingRequest(
@@ -495,6 +521,12 @@ class Gateway:
             prompt_tokens=usage.prompt_tokens if usage is not None else None,
             seat=request.seat,
         )
+        if self._budgets is not None:
+            self._budgets.spend(
+                seat=request.seat,
+                provider_id=provider.provider_id,
+                tokens=usage.total_tokens if usage is not None else None,
+            )
         logger.info(
             "embeddings_completed",
             extra={

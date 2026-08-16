@@ -243,11 +243,49 @@ class UsageConfig(StrictConfigModel):
         return value
 
 
+class SeatBudgetConfig(StrictConfigModel):
+    """Daily hosted-provider limits for one seat (or the 'default' entry)."""
+
+    hosted_tokens_per_day: int | None = Field(default=None, strict=True, ge=0)
+    hosted_requests_per_day: int | None = Field(default=None, strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def at_least_one_limit(self) -> SeatBudgetConfig:
+        if self.hosted_tokens_per_day is None and self.hosted_requests_per_day is None:
+            raise ValueError("a budget entry must set at least one limit")
+        return self
+
+
+class BudgetsConfig(StrictConfigModel):
+    """Per-seat daily budgets for hosted providers (operator-requested).
+
+    Fail-closed: when this section exists, every hosted request needs a seat,
+    and every seat must resolve to an entry here (its own, or 'default').
+    Local providers are never budgeted.
+    """
+
+    seats: dict[str, SeatBudgetConfig] = Field(min_length=1)
+
+    @field_validator("seats")
+    @classmethod
+    def seat_names_must_be_valid(
+        cls, value: dict[str, SeatBudgetConfig]
+    ) -> dict[str, SeatBudgetConfig]:
+        import re
+
+        seat_re = re.compile(SEAT_PATTERN)
+        for name in value:
+            if not seat_re.fullmatch(name):
+                raise ValueError(f"invalid budget seat name: {name!r}")
+        return value
+
+
 class GatewayConfig(StrictConfigModel):
     schema_version: Literal[2]
     server: ServerConfig = Field(default_factory=ServerConfig)
     readiness: ReadinessConfig = Field(default_factory=ReadinessConfig)
     usage: UsageConfig | None = None
+    budgets: BudgetsConfig | None = None
     providers: dict[str, ProviderConfig] = Field(min_length=1)
     models: tuple[ModelConfig, ...] = Field(min_length=1)
 
