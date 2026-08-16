@@ -8,6 +8,7 @@ NEVER forwarded upstream — the sentinel tests at the bottom pin that.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import Any
@@ -494,12 +495,10 @@ def test_seat_never_escapes_on_mid_stream_protocol_failure(
         _streaming_client(handler, captured) as client,
     ):
         streamed = ""
-        try:
+        # The mid-body failure may surface as a transport-level error; the
+        # sentinels below still apply to whatever was produced before it died.
+        with contextlib.suppress(Exception):
             streamed = _labeled_stream(client)
-        except Exception:
-            # The mid-body failure may surface as a transport-level error;
-            # the sentinels below still apply to whatever was produced.
-            pass
         usage_body = client.get("/v1/usage").json()
 
     assert SEAT_SENTINEL not in captured[0].content.decode()
