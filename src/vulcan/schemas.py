@@ -7,7 +7,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from vulcan.config import PROVIDER_ID_PATTERN, PUBLIC_MODEL_PATTERN, Capability
+from vulcan.config import PROVIDER_ID_PATTERN, PUBLIC_MODEL_PATTERN, SEAT_PATTERN, Capability
 
 ProviderType = Literal["ollama", "anthropic", "openai_compatible", "deterministic"]
 
@@ -48,6 +48,9 @@ class ChatCompletionRequest(StrictSchema):
     temperature: float | None = Field(default=None, strict=True, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, strict=True, ge=1, le=32768)
     stream: bool = Field(default=False, strict=True)
+    # Optional caller attribution for /v1/usage. Operator-chosen, non-secret,
+    # never forwarded upstream (pinned by tests/test_seat.py sentinels).
+    seat: str | None = Field(default=None, strict=True, pattern=SEAT_PATTERN)
 
     @model_validator(mode="after")
     def require_user_message_and_bounded_input(self) -> Self:
@@ -61,6 +64,9 @@ class ChatCompletionRequest(StrictSchema):
 class EmbeddingsRequest(StrictSchema):
     model: str = Field(strict=True, pattern=PUBLIC_MODEL_PATTERN)
     input: StrictText | tuple[StrictText, ...]
+    # Optional caller attribution for /v1/usage. Operator-chosen, non-secret,
+    # never forwarded upstream (pinned by tests/test_seat.py sentinels).
+    seat: str | None = Field(default=None, strict=True, pattern=SEAT_PATTERN)
 
     @property
     def inputs(self) -> tuple[str, ...]:
@@ -241,6 +247,11 @@ class ProviderUsageRecord(StrictSchema):
     totals: UsageTotalsRecord
 
 
+class SeatUsageRecord(StrictSchema):
+    seat: str = Field(pattern=SEAT_PATTERN)
+    totals: UsageTotalsRecord
+
+
 class UsageResponse(StrictSchema):
     object: Literal["usage"] = "usage"
     scope: Literal["process"] = "process"
@@ -248,6 +259,7 @@ class UsageResponse(StrictSchema):
     totals: UsageTotalsRecord
     by_model: tuple[ModelUsageRecord, ...]
     by_provider: tuple[ProviderUsageRecord, ...]
+    by_seat: tuple[SeatUsageRecord, ...]
 
 
 class ValidationIssue(StrictSchema):

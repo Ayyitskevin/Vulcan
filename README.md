@@ -330,7 +330,8 @@ is a response whose vector count does not match the input count.
 
 `GET /v1/usage` reports what this process has served since it started: completed
 request counts and the token counts upstreams actually reported, broken down by
-public alias and by provider.
+public alias, by provider, and — for requests that carry the optional `seat`
+label — by caller.
 
 ```json
 {
@@ -349,9 +350,19 @@ public alias and by provider.
   ],
   "by_provider": [
     {"provider": "local-ollama", "totals": {"...": 0}}
+  ],
+  "by_seat": [
+    {"seat": "claude", "totals": {"...": 0}}
   ]
 }
 ```
+
+Chat and embedding requests accept an optional `seat` field — an
+operator-chosen caller label (`^[a-z0-9][a-z0-9_-]{0,63}$`, same shape as a
+provider ID) so several local tools sharing one gateway can see who spent
+what. Attribution only: unlabeled requests still count in every other view,
+an unknown label is never rejected against a roster, and the label is never
+forwarded upstream or logged with content. No budgets are enforced.
 
 Deliberate limits, so this stays infrastructure rather than a billing system:
 
@@ -363,6 +374,8 @@ Deliberate limits, so this stays infrastructure rather than a billing system:
   but no tokens, so `requests_with_usage` is what makes the token totals
   interpretable. Embeddings report prompt tokens only.
 - **No costs, prices, or currencies.**
+- **Seats are labels, not identities.** `seat` is voluntary caller metadata
+  for attribution — it is not authentication, and nothing enforces it.
 
 All request failures use the same envelope and include a generated `X-Request-ID`
 response header. Validation details contain only field paths and reason codes;

@@ -246,7 +246,8 @@ paths; only the payload differs.
 
 `GET /v1/usage` exposes an in-memory `UsageRecorder` held by the gateway:
 counts of completed requests plus the token counts upstreams reported, keyed
-by public alias and configured provider ID.
+by public alias, configured provider ID, and (when the request carries the
+optional `seat` label) the caller.
 
 - **Recorded on success only.** Chat (buffered and streaming) and embeddings
   record after the response is fully assembled; a failure records nothing,
@@ -261,6 +262,11 @@ by public alias and configured provider ID.
   credential is involved.
 - **No locking needed.** Increments happen on one event loop with no await
   between read and write.
+- **Seat attribution is optional and inert.** `seat` on chat/embedding
+  requests (validated against `SEAT_PATTERN`) only adds a `by_seat` view.
+  Unlabeled requests count everywhere else; the label is never forwarded
+  upstream (pinned by `tests/test_seat.py` sentinels) and carries no
+  authentication or budget semantics — it is voluntary caller metadata.
 
 ## Error normalization
 

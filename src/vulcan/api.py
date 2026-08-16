@@ -43,6 +43,7 @@ from vulcan.schemas import (
     ModelUsageRecord,
     ProviderStatus,
     ProviderUsageRecord,
+    SeatUsageRecord,
     UsageResponse,
     UsageTotalsRecord,
     ValidationIssue,
@@ -472,6 +473,10 @@ def create_app(
             by_provider=tuple(
                 ProviderUsageRecord(provider=item.provider, totals=_usage_totals(item.totals))
                 for item in snapshot.by_provider
+            ),
+            by_seat=tuple(
+                SeatUsageRecord(seat=item.seat, totals=_usage_totals(item.totals))
+                for item in snapshot.by_seat
             ),
         )
 

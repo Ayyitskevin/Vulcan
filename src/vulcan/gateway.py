@@ -249,6 +249,7 @@ class Gateway:
             provider=provider.provider_id,
             prompt_tokens=usage.prompt_tokens if usage is not None else None,
             completion_tokens=usage.completion_tokens if usage is not None else None,
+            seat=request.seat,
         )
         logger.info(
             "chat_completed",
@@ -439,6 +440,7 @@ class Gateway:
             provider=provider.provider_id,
             prompt_tokens=final_usage.prompt_tokens if final_usage is not None else None,
             completion_tokens=final_usage.completion_tokens if final_usage is not None else None,
+            seat=request.seat,
         )
         logger.info(
             "chat_completed",
@@ -491,6 +493,7 @@ class Gateway:
             model=request.model,
             provider=provider.provider_id,
             prompt_tokens=usage.prompt_tokens if usage is not None else None,
+            seat=request.seat,
         )
         logger.info(
             "embeddings_completed",
