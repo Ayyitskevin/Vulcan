@@ -244,16 +244,15 @@ class UsageConfig(StrictConfigModel):
 
 
 class SeatBudgetConfig(StrictConfigModel):
-    """Daily hosted-provider limits for one seat (or the 'default' entry)."""
+    """Daily hosted-provider limits for one seat (or the 'default' entry).
 
+    The request cap is REQUIRED: it bounds in-flight concurrency, and
+    therefore bounds token overshoot — a tokens-only budget would leave
+    overshoot unbounded under concurrent traffic.
+    """
+
+    hosted_requests_per_day: int = Field(strict=True, ge=0)
     hosted_tokens_per_day: int | None = Field(default=None, strict=True, ge=0)
-    hosted_requests_per_day: int | None = Field(default=None, strict=True, ge=0)
-
-    @model_validator(mode="after")
-    def at_least_one_limit(self) -> SeatBudgetConfig:
-        if self.hosted_tokens_per_day is None and self.hosted_requests_per_day is None:
-            raise ValueError("a budget entry must set at least one limit")
-        return self
 
 
 class BudgetsConfig(StrictConfigModel):
@@ -286,6 +285,19 @@ class GatewayConfig(StrictConfigModel):
     readiness: ReadinessConfig = Field(default_factory=ReadinessConfig)
     usage: UsageConfig | None = None
     budgets: BudgetsConfig | None = None
+
+    @model_validator(mode="after")
+    def budgets_require_the_ledger(self) -> GatewayConfig:
+        # Budgets promise restart-proof allowances; without the ledger a
+        # restart would silently hand every seat a fresh window. Refuse the
+        # combination instead of quietly weakening the contract.
+        if self.budgets is not None and self.usage is None:
+            raise ValueError(
+                "[budgets] requires [usage].ledger_path — without the durable "
+                "ledger, budget windows would reset on every restart"
+            )
+        return self
+
     providers: dict[str, ProviderConfig] = Field(min_length=1)
     models: tuple[ModelConfig, ...] = Field(min_length=1)
 

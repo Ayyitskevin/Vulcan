@@ -228,59 +228,81 @@ class Gateway:
         if request_id is not None:
             metadata["request_id"] = request_id
         provider: Provider | None = None
+        reservation: int | None = None
+        settled = False
         try:
-            if request.stream:
-                # Streaming belongs on chat_stream; the HTTP layer routes it
-                # there. Reaching here would silently buffer a stream instead.
-                raise UnsupportedCapabilityError("streaming", request.model)
-            model, provider = self._select_provider(request, metadata)
-            if self._budgets is not None:
-                # Budgets gate BEFORE the upstream call: over-budget requests
-                # are refused loudly, never rerouted (one alias, one provider).
-                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
-            provider_request = await self._preflight(model, request)
-            result = await provider.chat(provider_request)
-        except VulcanError as exc:
-            self._handle_chat_failure(exc, provider, metadata)
-            raise
+            try:
+                if request.stream:
+                    # Streaming belongs on chat_stream; the HTTP layer routes
+                    # it there. Reaching here would silently buffer a stream.
+                    raise UnsupportedCapabilityError("streaming", request.model)
+                model, provider = self._select_provider(request, metadata)
+                if self._budgets is not None:
+                    # Budgets gate BEFORE the upstream call: over-budget
+                    # requests are refused loudly, never rerouted. check()
+                    # atomically reserves the request slot when it passes.
+                    reservation = self._budgets.check(
+                        seat=request.seat, provider_id=provider.provider_id
+                    )
+                provider_request = await self._preflight(model, request)
+                result = await provider.chat(provider_request)
+            except VulcanError as exc:
+                self._handle_chat_failure(exc, provider, metadata)
+                raise
 
-        usage = None
-        if result.usage is not None:
-            usage = TokenUsage(
-                prompt_tokens=result.usage.prompt_tokens,
-                completion_tokens=result.usage.completion_tokens,
-                total_tokens=result.usage.prompt_tokens + result.usage.completion_tokens,
-            )
-        self._usage.record(
-            model=request.model,
-            provider=provider.provider_id,
-            prompt_tokens=usage.prompt_tokens if usage is not None else None,
-            completion_tokens=usage.completion_tokens if usage is not None else None,
-            seat=request.seat,
-        )
-        if self._budgets is not None:
-            self._budgets.spend(
+            usage = None
+            if result.usage is not None:
+                usage = TokenUsage(
+                    prompt_tokens=result.usage.prompt_tokens,
+                    completion_tokens=result.usage.completion_tokens,
+                    total_tokens=result.usage.prompt_tokens + result.usage.completion_tokens,
+                )
+            self._usage.record(
+                model=request.model,
+                provider=provider.provider_id,
+                prompt_tokens=usage.prompt_tokens if usage is not None else None,
+                completion_tokens=usage.completion_tokens if usage is not None else None,
                 seat=request.seat,
-                provider_id=provider.provider_id,
-                tokens=usage.total_tokens if usage is not None else None,
             )
-        logger.info(
-            "chat_completed",
-            extra={"metadata": {**metadata, "output_chars": len(result.content)}},
-        )
-        return ChatCompletionResponse(
-            id=self._id_factory(),
-            created=int(self._clock()),
-            model=request.model,
-            provider=provider.provider_id,
-            choices=(
-                ChatChoice(
-                    message=AssistantMessage(content=result.content),
-                    finish_reason=result.finish_reason,
+            if self._budgets is not None and reservation is not None:
+                self._budgets.settle(
+                    seat=request.seat,
+                    provider_id=provider.provider_id,
+                    tokens=usage.total_tokens if usage is not None else None,
+                    reservation_day=reservation,
+                )
+            settled = True
+            logger.info(
+                "chat_completed",
+                extra={"metadata": {**metadata, "output_chars": len(result.content)}},
+            )
+            return ChatCompletionResponse(
+                id=self._id_factory(),
+                created=int(self._clock()),
+                model=request.model,
+                provider=provider.provider_id,
+                choices=(
+                    ChatChoice(
+                        message=AssistantMessage(content=result.content),
+                        finish_reason=result.finish_reason,
+                    ),
                 ),
-            ),
-            usage=usage,
-        )
+                usage=usage,
+            )
+        finally:
+            # Covers VulcanError, CancelledError, and client disconnects
+            # alike: an unsettled reservation is always returned.
+            if (
+                reservation is not None
+                and not settled
+                and provider is not None
+                and self._budgets is not None
+            ):
+                self._budgets.release(
+                    seat=request.seat,
+                    provider_id=provider.provider_id,
+                    reservation_day=reservation,
+                )
 
     def _select_provider(
         self,
@@ -384,91 +406,122 @@ class Gateway:
             metadata["request_id"] = request_id
 
         provider: Provider | None = None
+        reservation: int | None = None
+        settled = False
         try:
-            model, provider = self._select_provider(request, metadata)
-            if self._budgets is not None:
-                # Budgets gate BEFORE the upstream call: over-budget requests
-                # are refused loudly, never rerouted (one alias, one provider).
-                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
-            provider_request = await self._preflight(model, request)
-            events = provider.chat_stream(provider_request).__aiter__()
-            # Opening the upstream stream (and classifying its status) happens
-            # on this first pull, while a JSON error envelope is still possible.
-            event = await self._next_event(events)
-        except VulcanError as exc:
-            self._handle_chat_failure(exc, provider, metadata)
-            raise
-
-        completion_id = self._id_factory()
-        created = int(self._clock())
-
-        def chunk(
-            delta: ChunkDelta,
-            *,
-            finish_reason: Literal["stop", "length"] | None = None,
-            usage: TokenUsage | None = None,
-        ) -> ChatCompletionChunk:
-            return ChatCompletionChunk(
-                id=completion_id,
-                created=created,
-                model=request.model,
-                provider=provider.provider_id,
-                choices=(ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),),
-                usage=usage,
-            )
-
-        yield chunk(ChunkDelta(role="assistant"))
-
-        output_chars = 0
-        final_usage: TokenUsage | None = None
-        try:
-            completed = False
-            while event is not None:
-                if isinstance(event, StreamDelta):
-                    if event.text:
-                        output_chars += len(event.text)
-                        yield chunk(ChunkDelta(content=event.text))
-                    event = await self._next_event(events)
-                    continue
-                if event.usage is not None:
-                    final_usage = TokenUsage(
-                        prompt_tokens=event.usage.prompt_tokens,
-                        completion_tokens=event.usage.completion_tokens,
-                        total_tokens=event.usage.prompt_tokens + event.usage.completion_tokens,
+            try:
+                model, provider = self._select_provider(request, metadata)
+                if self._budgets is not None:
+                    # Budgets gate BEFORE the upstream call: over-budget
+                    # requests are refused loudly, never rerouted. check()
+                    # atomically reserves the request slot when it passes.
+                    reservation = self._budgets.check(
+                        seat=request.seat, provider_id=provider.provider_id
                     )
-                yield chunk(ChunkDelta(), finish_reason=event.finish_reason, usage=final_usage)
-                completed = True
-                break
-            if not completed:
-                # The upstream closed without a terminal event: truncated reply.
-                raise ProviderProtocolError
-        except VulcanError as exc:
-            self._handle_chat_failure(exc, provider, metadata)
-            raise
-        finally:
-            # Releases the upstream response on normal completion, on error,
-            # and when the client disconnects mid-stream.
-            aclose = getattr(events, "aclose", None)
-            if aclose is not None:
-                await aclose()
+                provider_request = await self._preflight(model, request)
+                events = provider.chat_stream(provider_request).__aiter__()
+                # Opening the upstream stream (and classifying its status)
+                # happens on this first pull, while a JSON error envelope is
+                # still possible.
+                event = await self._next_event(events)
+            except VulcanError as exc:
+                self._handle_chat_failure(exc, provider, metadata)
+                raise
 
-        self._usage.record(
-            model=request.model,
-            provider=provider.provider_id,
-            prompt_tokens=final_usage.prompt_tokens if final_usage is not None else None,
-            completion_tokens=final_usage.completion_tokens if final_usage is not None else None,
-            seat=request.seat,
-        )
-        if self._budgets is not None:
-            self._budgets.spend(
-                seat=request.seat,
-                provider_id=provider.provider_id,
-                tokens=final_usage.total_tokens if final_usage is not None else None,
-            )
-        logger.info(
-            "chat_completed",
-            extra={"metadata": {**metadata, "output_chars": output_chars}},
-        )
+            completion_id = self._id_factory()
+            created = int(self._clock())
+
+            def chunk(
+                delta: ChunkDelta,
+                *,
+                finish_reason: Literal["stop", "length"] | None = None,
+                usage: TokenUsage | None = None,
+            ) -> ChatCompletionChunk:
+                return ChatCompletionChunk(
+                    id=completion_id,
+                    created=created,
+                    model=request.model,
+                    provider=provider.provider_id,
+                    choices=(ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),),
+                    usage=usage,
+                )
+
+            yield chunk(ChunkDelta(role="assistant"))
+
+            output_chars = 0
+            final_usage: TokenUsage | None = None
+            try:
+                completed = False
+                while event is not None:
+                    if isinstance(event, StreamDelta):
+                        if event.text:
+                            output_chars += len(event.text)
+                            yield chunk(ChunkDelta(content=event.text))
+                        event = await self._next_event(events)
+                        continue
+                    if event.usage is not None:
+                        final_usage = TokenUsage(
+                            prompt_tokens=event.usage.prompt_tokens,
+                            completion_tokens=event.usage.completion_tokens,
+                            total_tokens=event.usage.prompt_tokens + event.usage.completion_tokens,
+                        )
+                    # The upstream HAS completed: its tokens are generated and
+                    # (when reported) known. Commit the meter and the budget
+                    # BEFORE yielding the terminal chunk, so a consumer that
+                    # disconnects at the final yield cannot evade either —
+                    # repeated final-chunk abandonment must never be free.
+                    self._usage.record(
+                        model=request.model,
+                        provider=provider.provider_id,
+                        prompt_tokens=final_usage.prompt_tokens
+                        if final_usage is not None
+                        else None,
+                        completion_tokens=final_usage.completion_tokens
+                        if final_usage is not None
+                        else None,
+                        seat=request.seat,
+                    )
+                    if self._budgets is not None and reservation is not None:
+                        self._budgets.settle(
+                            seat=request.seat,
+                            provider_id=provider.provider_id,
+                            tokens=final_usage.total_tokens if final_usage is not None else None,
+                            reservation_day=reservation,
+                        )
+                    settled = True
+                    logger.info(
+                        "chat_completed",
+                        extra={"metadata": {**metadata, "output_chars": output_chars}},
+                    )
+                    yield chunk(ChunkDelta(), finish_reason=event.finish_reason, usage=final_usage)
+                    completed = True
+                    break
+                if not completed:
+                    # The upstream closed without a terminal event: truncated reply.
+                    raise ProviderProtocolError
+            except VulcanError as exc:
+                self._handle_chat_failure(exc, provider, metadata)
+                raise
+            finally:
+                # Releases the upstream response on normal completion, on error,
+                # and when the client disconnects mid-stream.
+                aclose = getattr(events, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+        finally:
+            # Covers VulcanError, CancelledError, and generator aclose() at
+            # ANY yield point: an unsettled reservation is always returned.
+            if (
+                reservation is not None
+                and not settled
+                and provider is not None
+                and self._budgets is not None
+            ):
+                self._budgets.release(
+                    seat=request.seat,
+                    provider_id=provider.provider_id,
+                    reservation_day=reservation,
+                )
 
     async def embed(
         self,
@@ -487,65 +540,87 @@ class Gateway:
         if request_id is not None:
             metadata["request_id"] = request_id
         provider: Provider | None = None
+        reservation: int | None = None
+        settled = False
         try:
-            model = self.registry.require_capability(request.model, Capability.EMBEDDINGS)
-            provider = self._provider_for(model.provider_id)
-            metadata["provider"] = provider.provider_id
-            metadata["provider_type"] = provider.provider_type
-            if self._budgets is not None:
-                # Same gate as chat: refused loudly before the upstream call.
-                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
-            await self._assert_model_available(model)
-            result = await provider.embed(
-                ProviderEmbeddingRequest(
-                    provider_model=model.provider_model,
-                    inputs=inputs,
+            try:
+                model = self.registry.require_capability(request.model, Capability.EMBEDDINGS)
+                provider = self._provider_for(model.provider_id)
+                metadata["provider"] = provider.provider_id
+                metadata["provider_type"] = provider.provider_type
+                if self._budgets is not None:
+                    # Same gate as chat: refused loudly before the upstream
+                    # call. check() atomically reserves the request slot.
+                    reservation = self._budgets.check(
+                        seat=request.seat, provider_id=provider.provider_id
+                    )
+                await self._assert_model_available(model)
+                result = await provider.embed(
+                    ProviderEmbeddingRequest(
+                        provider_model=model.provider_model,
+                        inputs=inputs,
+                    )
                 )
-            )
-            if len(result.vectors) != len(inputs):
-                # A vector per input, or the client cannot align them at all.
-                raise ProviderProtocolError
-        except VulcanError as exc:
-            self._handle_failure(exc, provider, metadata, event="embeddings_failed")
-            raise
+                if len(result.vectors) != len(inputs):
+                    # A vector per input, or the client cannot align them.
+                    raise ProviderProtocolError
+            except VulcanError as exc:
+                self._handle_failure(exc, provider, metadata, event="embeddings_failed")
+                raise
 
-        usage = None
-        if result.usage is not None:
-            usage = EmbeddingUsage(
-                prompt_tokens=result.usage.prompt_tokens,
-                total_tokens=result.usage.total_tokens,
-            )
-        self._usage.record(
-            model=request.model,
-            provider=provider.provider_id,
-            prompt_tokens=usage.prompt_tokens if usage is not None else None,
-            seat=request.seat,
-        )
-        if self._budgets is not None:
-            self._budgets.spend(
+            usage = None
+            if result.usage is not None:
+                usage = EmbeddingUsage(
+                    prompt_tokens=result.usage.prompt_tokens,
+                    total_tokens=result.usage.total_tokens,
+                )
+            self._usage.record(
+                model=request.model,
+                provider=provider.provider_id,
+                prompt_tokens=usage.prompt_tokens if usage is not None else None,
                 seat=request.seat,
-                provider_id=provider.provider_id,
-                tokens=usage.total_tokens if usage is not None else None,
             )
-        logger.info(
-            "embeddings_completed",
-            extra={
-                "metadata": {
-                    **metadata,
-                    "vector_count": len(result.vectors),
-                    "dimensions": len(result.vectors[0]) if result.vectors else 0,
-                }
-            },
-        )
-        return EmbeddingsResponse(
-            model=request.model,
-            provider=provider.provider_id,
-            data=tuple(
-                EmbeddingRecord(index=index, embedding=vector)
-                for index, vector in enumerate(result.vectors)
-            ),
-            usage=usage,
-        )
+            if self._budgets is not None and reservation is not None:
+                self._budgets.settle(
+                    seat=request.seat,
+                    provider_id=provider.provider_id,
+                    tokens=usage.total_tokens if usage is not None else None,
+                    reservation_day=reservation,
+                )
+            settled = True
+            logger.info(
+                "embeddings_completed",
+                extra={
+                    "metadata": {
+                        **metadata,
+                        "vector_count": len(result.vectors),
+                        "dimensions": len(result.vectors[0]) if result.vectors else 0,
+                    }
+                },
+            )
+            return EmbeddingsResponse(
+                model=request.model,
+                provider=provider.provider_id,
+                data=tuple(
+                    EmbeddingRecord(index=index, embedding=vector)
+                    for index, vector in enumerate(result.vectors)
+                ),
+                usage=usage,
+            )
+        finally:
+            # Covers VulcanError, CancelledError, and client disconnects
+            # alike: an unsettled reservation is always returned.
+            if (
+                reservation is not None
+                and not settled
+                and provider is not None
+                and self._budgets is not None
+            ):
+                self._budgets.release(
+                    seat=request.seat,
+                    provider_id=provider.provider_id,
+                    reservation_day=reservation,
+                )
 
     def usage_snapshot(self) -> UsageSnapshot:
         """Process-lifetime counters for completed requests."""

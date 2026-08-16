@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from vulcan.errors import BudgetExhaustedError, BudgetUnconfiguredError, SeatRequiredError
 
 _DAY_SECONDS = 86_400
+# DoS guard: a default budget admits unlimited caller-chosen labels; state per
+# seat is tiny but must still be bounded. Real fleets have single-digit seats.
+_MAX_TRACKED_SEATS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,22 +82,38 @@ class BudgetBook:
     def _limits_for(self, seat: str) -> SeatLimits | None:
         return self._limits.get(seat, self._default)
 
-    def check(self, *, seat: str | None, provider_id: str) -> None:
-        """Pre-flight gate: raises before any upstream call is made.
+    def check(self, *, seat: str | None, provider_id: str) -> int | None:
+        """Pre-flight gate AND atomic request-slot reservation.
 
-        Local providers pass unconditionally. Hosted requests must carry a
-        seat, the seat must resolve to a budget (fail-closed), and the seat
-        must have headroom in the current UTC day.
+        Local providers pass without reserving (returns None). For hosted:
+        the seat must exist, resolve to a budget (fail-closed), and have
+        headroom — then the request slot is reserved in the same synchronous
+        call, so N concurrent requests can never all pass the last slot of a
+        request cap. Returns the reservation's UTC day; the caller MUST later
+        call settle() (success) or release() (failure) with that value — the
+        day makes midnight-straddling requests account identically live and
+        on ledger replay (both attribute to the completion day).
+
+        Token headroom is checked but cannot be reserved (counts arrive after
+        completion): token overshoot is bounded by the number of concurrently
+        in-flight requests per seat, which the request cap bounds in turn
+        (config REQUIRES a request cap on every entry). Documented, not
+        hidden.
         """
 
         if provider_id not in self._hosted:
-            return
+            return None
         if seat is None:
             raise SeatRequiredError(provider_id)
         limits = self._limits_for(seat)
         if limits is None:
             raise BudgetUnconfiguredError(seat)
         self._roll()
+        if seat not in self._requests and len(self._requests) >= _MAX_TRACKED_SEATS:
+            # Cardinality guard: an unbounded stream of fresh labels under a
+            # default budget must not grow state without limit. The message
+            # tells the operator the fix (a named entry always fits).
+            raise BudgetUnconfiguredError(seat)
         resets_at = self._resets_at()
         if (
             limits.hosted_tokens_per_day is not None
@@ -106,26 +125,74 @@ class BudgetBook:
             and self._requests.get(seat, 0) >= limits.hosted_requests_per_day
         ):
             raise BudgetExhaustedError(seat, window_resets_at=resets_at)
+        # No await between the checks above and this reservation: atomic on
+        # the single event loop.
+        self._requests[seat] = self._requests.get(seat, 0) + 1
+        return self._day
 
-    def spend(
+    def settle(
         self,
         *,
         seat: str | None,
         provider_id: str,
         tokens: int | None,
-        ts: float | None = None,
+        reservation_day: int,
     ) -> None:
-        """Record completed hosted spend. ``ts`` is for ledger replay only.
+        """Complete a reservation: spend lands in the completion day.
 
-        Replayed records from a previous UTC day are ignored — yesterday's
-        spend never counts against today's window.
+        If UTC midnight passed since check(), the roll cleared the reserved
+        slot — re-count the request in the completion day, so live accounting
+        matches what a later ledger replay (keyed on the completion
+        timestamp) will reconstruct.
         """
 
         if provider_id not in self._hosted or seat is None:
             return
         self._roll()
-        when = self._clock() if ts is None else ts
-        if int(when) // _DAY_SECONDS != self._day:
+        if reservation_day != self._day:
+            self._requests[seat] = self._requests.get(seat, 0) + 1
+        self._tokens[seat] = self._tokens.get(seat, 0) + (tokens or 0)
+
+    def release(self, *, seat: str | None, provider_id: str, reservation_day: int) -> None:
+        """Return a reserved request slot after failure or cancellation.
+
+        Failures are never usage and never budget spend. After a UTC rollover
+        the slot no longer exists (the roll cleared it) — nothing to return.
+        """
+
+        if provider_id not in self._hosted or seat is None:
+            return
+        self._roll()
+        if reservation_day != self._day:
+            return
+        current = self._requests.get(seat, 0)
+        if current > 0:
+            self._requests[seat] = current - 1
+
+    def replay_spend(
+        self,
+        *,
+        seat: str | None,
+        provider_id: str,
+        tokens: int | None,
+        ts: float,
+    ) -> None:
+        """Count one completed request from the ledger at boot.
+
+        Records from a previous UTC day are ignored — yesterday's spend never
+        counts against today's window.
+        """
+
+        if provider_id not in self._hosted or seat is None:
+            return
+        self._roll()
+        if int(ts) // _DAY_SECONDS != self._day:
+            return
+        if seat not in self._requests and len(self._requests) >= _MAX_TRACKED_SEATS:
+            # Same cardinality guard as check(): a ledger crafted (or written
+            # before this guard existed) with unbounded distinct labels must
+            # not repopulate unbounded state at boot. Skipping under-meters
+            # those seats, which is the safe direction for a refusal gate.
             return
         self._tokens[seat] = self._tokens.get(seat, 0) + (tokens or 0)
         self._requests[seat] = self._requests.get(seat, 0) + 1

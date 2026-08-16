@@ -57,6 +57,7 @@ logger = logging.getLogger("vulcan.api")
 
 ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ErrorEnvelope},
+    403: {"model": ErrorEnvelope},
     404: {"model": ErrorEnvelope},
     422: {"model": ErrorEnvelope},
     429: {"model": ErrorEnvelope},

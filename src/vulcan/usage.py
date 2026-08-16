@@ -304,12 +304,13 @@ class UsageRecorder:
                     completion if isinstance(completion, int) else 0
                 )
                 ts = record["ts"]
-                budget_book.spend(
-                    seat=seat if isinstance(seat, str) else None,
-                    provider_id=str(record["provider"]),
-                    tokens=tokens,
-                    ts=float(ts) if isinstance(ts, int) else None,
-                )
+                if isinstance(ts, int):
+                    budget_book.replay_spend(
+                        seat=seat if isinstance(seat, str) else None,
+                        provider_id=str(record["provider"]),
+                        tokens=tokens,
+                        ts=float(ts),
+                    )
 
         ledger.replay(sink)
         return recorder
