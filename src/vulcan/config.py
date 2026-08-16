@@ -244,16 +244,15 @@ class UsageConfig(StrictConfigModel):
 
 
 class SeatBudgetConfig(StrictConfigModel):
-    """Daily hosted-provider limits for one seat (or the 'default' entry)."""
+    """Daily hosted-provider limits for one seat (or the 'default' entry).
 
+    The request cap is REQUIRED: it bounds in-flight concurrency, and
+    therefore bounds token overshoot — a tokens-only budget would leave
+    overshoot unbounded under concurrent traffic.
+    """
+
+    hosted_requests_per_day: int = Field(strict=True, ge=0)
     hosted_tokens_per_day: int | None = Field(default=None, strict=True, ge=0)
-    hosted_requests_per_day: int | None = Field(default=None, strict=True, ge=0)
-
-    @model_validator(mode="after")
-    def at_least_one_limit(self) -> SeatBudgetConfig:
-        if self.hosted_tokens_per_day is None and self.hosted_requests_per_day is None:
-            raise ValueError("a budget entry must set at least one limit")
-        return self
 
 
 class BudgetsConfig(StrictConfigModel):
