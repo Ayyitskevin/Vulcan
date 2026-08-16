@@ -9,6 +9,7 @@ NEVER forwarded upstream — the sentinel tests at the bottom pin that.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -308,7 +309,10 @@ def test_seat_never_appears_in_upstream_or_downstream_stream(
         ),
     }
     app = create_app(config, providers=providers, clock=lambda: 1_700_000_000.0)
-    with TestClient(app, base_url="http://127.0.0.1") as client:
+    with (
+        caplog.at_level(logging.INFO, logger="vulcan.gateway"),
+        TestClient(app, base_url="http://127.0.0.1") as client,
+    ):
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -326,6 +330,8 @@ def test_seat_never_appears_in_upstream_or_downstream_stream(
     assert SEAT_SENTINEL not in captured[0].content.decode()
     assert SEAT_SENTINEL not in str(captured[0].headers)
     assert SEAT_SENTINEL not in streamed
+    # Positive capture proof first, so the negative assertion cannot be vacuous.
+    assert "chat_completed" in caplog.text
     assert SEAT_SENTINEL not in caplog.text
     # The stream still recorded its seat once fully drained.
     assert [item["seat"] for item in usage_body["by_seat"]] == [SEAT_SENTINEL]
@@ -353,7 +359,10 @@ def test_seat_never_appears_in_error_responses_or_logs(
         ),
     }
     app = create_app(config, providers=providers, clock=lambda: 1_700_000_000.0)
-    with TestClient(app, base_url="http://127.0.0.1") as client:
+    with (
+        caplog.at_level(logging.INFO, logger="vulcan.gateway"),
+        TestClient(app, base_url="http://127.0.0.1") as client,
+    ):
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -366,6 +375,8 @@ def test_seat_never_appears_in_error_responses_or_logs(
 
     assert response.status_code >= 500
     assert SEAT_SENTINEL not in response.text
+    # The failure was logged (positive capture proof), just never with the seat.
+    assert caplog.text != ""
     assert SEAT_SENTINEL not in caplog.text
     # Failures are never usage: the seat records nothing.
     assert usage_body["by_seat"] == []
@@ -376,7 +387,124 @@ def test_labeled_success_logs_never_carry_the_seat(
 ) -> None:
     """Content-safe logs stay seat-free on the success path too."""
 
-    with _client() as client:
+    with (
+        caplog.at_level(logging.INFO, logger="vulcan.gateway"),
+        _client() as client,
+    ):
         assert _chat(client, seat=SEAT_SENTINEL).status_code == 200
 
+    # Positive capture proof first, so the negative assertion cannot be vacuous.
+    assert "chat_completed" in caplog.text
     assert SEAT_SENTINEL not in caplog.text
+
+
+def _streaming_client(handler: Any, captured: list[httpx.Request]) -> TestClient:
+    def capturing(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return handler(request)
+
+    config = _openai_config()
+    providers: dict[str, Provider] = {
+        "det": DeterministicProvider("det", config.providers["det"]),
+        "openai": OpenAICompatibleProvider(
+            "openai",
+            config.providers["openai"],
+            client=httpx.AsyncClient(
+                base_url=config.providers["openai"].base_url,
+                transport=httpx.MockTransport(capturing),
+                trust_env=False,
+            ),
+        ),
+    }
+    app = create_app(config, providers=providers, clock=lambda: 1_700_000_000.0)
+    return TestClient(app, base_url="http://127.0.0.1")
+
+
+def _labeled_stream(client: TestClient) -> str:
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "hosted-chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+            "seat": SEAT_SENTINEL,
+        },
+    )
+    return response.read().decode()
+
+
+def test_seat_records_when_upstream_omits_the_done_terminator(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """EOF without [DONE] is tolerated upstream, so the request completes.
+
+    The adapter yields a normal StreamEnd at upstream EOF (finish_reason
+    None); the gateway records it as a completed request with no reported
+    tokens. The seat rides along into by_seat and escapes nowhere.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = 'data: {"choices": [{"delta": {"content": "partial"}, "finish_reason": null}]}\n\n'
+        return httpx.Response(
+            200,
+            content=body.encode(),  # no terminal chunk, no [DONE]
+            headers={"content-type": "text/event-stream"},
+        )
+
+    captured: list[httpx.Request] = []
+    with (
+        caplog.at_level(logging.INFO, logger="vulcan.gateway"),
+        _streaming_client(handler, captured) as client,
+    ):
+        streamed = _labeled_stream(client)
+        usage_body = client.get("/v1/usage").json()
+
+    assert SEAT_SENTINEL not in captured[0].content.decode()
+    assert SEAT_SENTINEL not in streamed
+    assert "chat_completed" in caplog.text
+    assert SEAT_SENTINEL not in caplog.text
+    seats = {item["seat"]: item["totals"] for item in usage_body["by_seat"]}
+    assert seats[SEAT_SENTINEL]["requests"] == 1
+    assert seats[SEAT_SENTINEL]["requests_with_usage"] == 0
+
+
+def test_seat_never_escapes_on_mid_stream_protocol_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed chunk after real deltas is the true mid-stream failure.
+
+    The adapter raises ProviderProtocolError, the gateway records no usage,
+    and the seat appears in neither the partial bytes nor the logs.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = (
+            'data: {"choices": [{"delta": {"content": "partial"}, "finish_reason": null}]}\n\n'
+            "data: {not-json\n\n"
+        )
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    captured: list[httpx.Request] = []
+    with (
+        caplog.at_level(logging.INFO, logger="vulcan.gateway"),
+        _streaming_client(handler, captured) as client,
+    ):
+        streamed = ""
+        try:
+            streamed = _labeled_stream(client)
+        except Exception:
+            # The mid-body failure may surface as a transport-level error;
+            # the sentinels below still apply to whatever was produced.
+            pass
+        usage_body = client.get("/v1/usage").json()
+
+    assert SEAT_SENTINEL not in captured[0].content.decode()
+    assert SEAT_SENTINEL not in streamed
+    assert caplog.text != ""  # the failure produced log records...
+    assert SEAT_SENTINEL not in caplog.text  # ...none of which carry the seat
+    # A stream that failed mid-flight is not usage, so the seat records nothing.
+    assert usage_body["by_seat"] == []
