@@ -421,12 +421,17 @@ never reroutes an over-budget request to another provider** — one alias, one
 provider, always; the caller owns any fallback decision. Local providers are
 never budgeted, and without the section behavior is unchanged.
 
-Budgets pair with the durable ledger: spend replays at startup, so a restart
-never resets an allowance. Known, documented imperfections: a single in-flight
-request may overshoot its remaining budget (token counts arrive after
-completion), and providers that omit counts under-meter — the request cap is
-the backstop. `/v1/usage` gains a `budgets` array with per-seat
-limits/spend/reset when enabled.
+Budgets **require** the durable ledger (`[usage].ledger_path` — startup
+refuses the combination without it): spend replays at boot, so a restart
+never resets an allowance. The request slot is reserved atomically inside the
+pre-flight check, so concurrent requests can never all pass the last slot of
+a request cap, and an upstream failure releases its slot (failures are never
+spend). Known, documented imperfections: token overshoot is bounded by the
+number of concurrently in-flight requests per seat (token counts arrive after
+completion; the request cap bounds the in-flight count), and providers that
+omit counts under-meter — the request cap is the backstop. Distinct tracked
+seats are capped at 4096 per window as a state-growth guard. `/v1/usage`
+gains a `budgets` array with per-seat limits/spend/reset when enabled.
 
 All request failures use the same envelope and include a generated `X-Request-ID`
 response header. Validation details contain only field paths and reason codes;

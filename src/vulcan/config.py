@@ -286,6 +286,19 @@ class GatewayConfig(StrictConfigModel):
     readiness: ReadinessConfig = Field(default_factory=ReadinessConfig)
     usage: UsageConfig | None = None
     budgets: BudgetsConfig | None = None
+
+    @model_validator(mode="after")
+    def budgets_require_the_ledger(self) -> GatewayConfig:
+        # Budgets promise restart-proof allowances; without the ledger a
+        # restart would silently hand every seat a fresh window. Refuse the
+        # combination instead of quietly weakening the contract.
+        if self.budgets is not None and self.usage is None:
+            raise ValueError(
+                "[budgets] requires [usage].ledger_path — without the durable "
+                "ledger, budget windows would reset on every restart"
+            )
+        return self
+
     providers: dict[str, ProviderConfig] = Field(min_length=1)
     models: tuple[ModelConfig, ...] = Field(min_length=1)
 

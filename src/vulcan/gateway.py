@@ -228,6 +228,7 @@ class Gateway:
         if request_id is not None:
             metadata["request_id"] = request_id
         provider: Provider | None = None
+        budget_reserved = False
         try:
             if request.stream:
                 # Streaming belongs on chat_stream; the HTTP layer routes it
@@ -237,10 +238,16 @@ class Gateway:
             if self._budgets is not None:
                 # Budgets gate BEFORE the upstream call: over-budget requests
                 # are refused loudly, never rerouted (one alias, one provider).
-                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
+                # check() atomically reserves the request slot when it passes.
+                budget_reserved = self._budgets.check(
+                    seat=request.seat, provider_id=provider.provider_id
+                )
             provider_request = await self._preflight(model, request)
             result = await provider.chat(provider_request)
         except VulcanError as exc:
+            if budget_reserved and provider is not None and self._budgets is not None:
+                # Failures are never spend: return the reserved slot.
+                self._budgets.release(seat=request.seat, provider_id=provider.provider_id)
             self._handle_chat_failure(exc, provider, metadata)
             raise
 
@@ -259,7 +266,7 @@ class Gateway:
             seat=request.seat,
         )
         if self._budgets is not None:
-            self._budgets.spend(
+            self._budgets.settle(
                 seat=request.seat,
                 provider_id=provider.provider_id,
                 tokens=usage.total_tokens if usage is not None else None,
@@ -384,18 +391,25 @@ class Gateway:
             metadata["request_id"] = request_id
 
         provider: Provider | None = None
+        budget_reserved = False
         try:
             model, provider = self._select_provider(request, metadata)
             if self._budgets is not None:
                 # Budgets gate BEFORE the upstream call: over-budget requests
                 # are refused loudly, never rerouted (one alias, one provider).
-                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
+                # check() atomically reserves the request slot when it passes.
+                budget_reserved = self._budgets.check(
+                    seat=request.seat, provider_id=provider.provider_id
+                )
             provider_request = await self._preflight(model, request)
             events = provider.chat_stream(provider_request).__aiter__()
             # Opening the upstream stream (and classifying its status) happens
             # on this first pull, while a JSON error envelope is still possible.
             event = await self._next_event(events)
         except VulcanError as exc:
+            if budget_reserved and provider is not None and self._budgets is not None:
+                # Failures are never spend: return the reserved slot.
+                self._budgets.release(seat=request.seat, provider_id=provider.provider_id)
             self._handle_chat_failure(exc, provider, metadata)
             raise
 
@@ -443,6 +457,9 @@ class Gateway:
                 # The upstream closed without a terminal event: truncated reply.
                 raise ProviderProtocolError
         except VulcanError as exc:
+            if budget_reserved and self._budgets is not None:
+                # A stream that failed mid-flight is never spend.
+                self._budgets.release(seat=request.seat, provider_id=provider.provider_id)
             self._handle_chat_failure(exc, provider, metadata)
             raise
         finally:
@@ -460,7 +477,7 @@ class Gateway:
             seat=request.seat,
         )
         if self._budgets is not None:
-            self._budgets.spend(
+            self._budgets.settle(
                 seat=request.seat,
                 provider_id=provider.provider_id,
                 tokens=final_usage.total_tokens if final_usage is not None else None,
@@ -487,6 +504,7 @@ class Gateway:
         if request_id is not None:
             metadata["request_id"] = request_id
         provider: Provider | None = None
+        budget_reserved = False
         try:
             model = self.registry.require_capability(request.model, Capability.EMBEDDINGS)
             provider = self._provider_for(model.provider_id)
@@ -494,7 +512,10 @@ class Gateway:
             metadata["provider_type"] = provider.provider_type
             if self._budgets is not None:
                 # Same gate as chat: refused loudly before the upstream call.
-                self._budgets.check(seat=request.seat, provider_id=provider.provider_id)
+                # check() atomically reserves the request slot when it passes.
+                budget_reserved = self._budgets.check(
+                    seat=request.seat, provider_id=provider.provider_id
+                )
             await self._assert_model_available(model)
             result = await provider.embed(
                 ProviderEmbeddingRequest(
@@ -506,6 +527,9 @@ class Gateway:
                 # A vector per input, or the client cannot align them at all.
                 raise ProviderProtocolError
         except VulcanError as exc:
+            if budget_reserved and provider is not None and self._budgets is not None:
+                # Failures are never spend: return the reserved slot.
+                self._budgets.release(seat=request.seat, provider_id=provider.provider_id)
             self._handle_failure(exc, provider, metadata, event="embeddings_failed")
             raise
 
@@ -522,7 +546,7 @@ class Gateway:
             seat=request.seat,
         )
         if self._budgets is not None:
-            self._budgets.spend(
+            self._budgets.settle(
                 seat=request.seat,
                 provider_id=provider.provider_id,
                 tokens=usage.total_tokens if usage is not None else None,

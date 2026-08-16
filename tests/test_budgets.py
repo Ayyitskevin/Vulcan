@@ -86,8 +86,8 @@ def test_hosted_seat_without_entry_fails_closed() -> None:
 
 def test_token_budget_exhausts_and_names_the_reset_time() -> None:
     book = _book(limits={"fable": SeatLimits(100, None)})
-    book.check(seat="fable", provider_id="hosted")
-    book.spend(seat="fable", provider_id="hosted", tokens=100)
+    assert book.check(seat="fable", provider_id="hosted") is True  # reserves
+    book.settle(seat="fable", provider_id="hosted", tokens=100)
 
     with pytest.raises(BudgetExhaustedError) as excinfo:
         book.check(seat="fable", provider_id="hosted")
@@ -101,17 +101,51 @@ def test_token_budget_exhausts_and_names_the_reset_time() -> None:
 def test_request_cap_catches_providers_that_omit_token_counts() -> None:
     book = _book(default=SeatLimits(None, 2))
     for _ in range(2):
-        book.check(seat="fable", provider_id="hosted")
-        book.spend(seat="fable", provider_id="hosted", tokens=None)  # no usage reported
+        book.check(seat="fable", provider_id="hosted")  # reserves the slot
+        book.settle(seat="fable", provider_id="hosted", tokens=None)  # no usage reported
 
     with pytest.raises(BudgetExhaustedError):
         book.check(seat="fable", provider_id="hosted")
 
 
+def test_reservation_is_atomic_with_the_check() -> None:
+    """The concurrency hole: N callers must not all pass the last slot.
+
+    check() reserves synchronously, so two sequential checks with no settle
+    in between (modelling two in-flight requests) cannot both pass a cap of 1.
+    """
+
+    book = _book(default=SeatLimits(None, 1))
+    assert book.check(seat="fable", provider_id="hosted") is True
+    with pytest.raises(BudgetExhaustedError):
+        book.check(seat="fable", provider_id="hosted")  # in-flight counts
+
+
+def test_release_returns_the_slot_after_failure() -> None:
+    book = _book(default=SeatLimits(None, 1))
+    assert book.check(seat="fable", provider_id="hosted") is True
+    book.release(seat="fable", provider_id="hosted")  # upstream failed
+    assert book.check(seat="fable", provider_id="hosted") is True  # slot back
+    assert book.snapshot()[0].requests_today == 1
+
+
+def test_seat_cardinality_is_bounded() -> None:
+    from vulcan.budgets import _MAX_TRACKED_SEATS
+
+    book = _book(default=SeatLimits(None, 10))
+    for i in range(_MAX_TRACKED_SEATS):
+        book.check(seat=f"s{i}", provider_id="hosted")
+    with pytest.raises(BudgetUnconfiguredError):
+        book.check(seat="one-too-many", provider_id="hosted")
+    # An already-tracked seat still works at the cap.
+    book.check(seat="s0", provider_id="hosted")
+
+
 def test_window_rolls_at_utc_midnight() -> None:
     now = [float(NOON)]
     book = _book(limits={"fable": SeatLimits(100, None)}, now=now)
-    book.spend(seat="fable", provider_id="hosted", tokens=100)
+    book.check(seat="fable", provider_id="hosted")
+    book.settle(seat="fable", provider_id="hosted", tokens=100)
     with pytest.raises(BudgetExhaustedError):
         book.check(seat="fable", provider_id="hosted")
 
@@ -122,7 +156,7 @@ def test_window_rolls_at_utc_midnight() -> None:
 
 def test_replayed_spend_from_a_previous_day_never_counts() -> None:
     book = _book(limits={"fable": SeatLimits(100, None)})
-    book.spend(seat="fable", provider_id="hosted", tokens=90, ts=float(NOON - DAY))
+    book.replay_spend(seat="fable", provider_id="hosted", tokens=90, ts=float(NOON - DAY))
     book.check(seat="fable", provider_id="hosted")  # yesterday is not today
     assert book.snapshot()[0].tokens_today == 0
 
@@ -131,9 +165,10 @@ def test_overshoot_is_inherent_and_documented() -> None:
     """Pre-flight passes with 1 token of headroom; the response may cost more."""
 
     book = _book(limits={"fable": SeatLimits(100, None)})
-    book.spend(seat="fable", provider_id="hosted", tokens=99)
+    book.check(seat="fable", provider_id="hosted")
+    book.settle(seat="fable", provider_id="hosted", tokens=99)
     book.check(seat="fable", provider_id="hosted")  # allowed at 99/100
-    book.spend(seat="fable", provider_id="hosted", tokens=500)  # single-request overshoot
+    book.settle(seat="fable", provider_id="hosted", tokens=500)  # single-request overshoot
     assert book.snapshot()[0].tokens_today == 599
     with pytest.raises(BudgetExhaustedError):
         book.check(seat="fable", provider_id="hosted")
@@ -228,8 +263,11 @@ def _chat(client: TestClient, model: str, seat: str | None = None) -> httpx.Resp
     return client.post("/v1/chat/completions", json=payload)
 
 
-def test_hosted_request_within_budget_succeeds_and_is_metered() -> None:
-    config = _config(_budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=1000)))
+def test_hosted_request_within_budget_succeeds_and_is_metered(tmp_path: Path) -> None:
+    config = _config(
+        _budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=1000)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
     with _client(config) as client:
         assert _chat(client, "hosted-chat", seat="fable").status_code == 200
         body = client.get("/v1/usage").json()
@@ -240,8 +278,11 @@ def test_hosted_request_within_budget_succeeds_and_is_metered() -> None:
     assert rows["fable"]["hosted_tokens_per_day"] == 1000
 
 
-def test_exhausted_seat_gets_429_with_reset_time_and_no_upstream_call() -> None:
-    config = _config(_budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=150)))
+def test_exhausted_seat_gets_429_with_reset_time_and_no_upstream_call(tmp_path: Path) -> None:
+    config = _config(
+        _budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=150)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
     with _client(config) as client:
         assert _chat(client, "hosted-chat", seat="fable").status_code == 200  # 100 tokens
         assert _chat(client, "hosted-chat", seat="fable").status_code == 200  # 200 > 150
@@ -258,8 +299,11 @@ def test_exhausted_seat_gets_429_with_reset_time_and_no_upstream_call() -> None:
     assert body["totals"]["requests"] == 2
 
 
-def test_unlabeled_hosted_request_is_refused_when_budgets_exist() -> None:
-    config = _config(_budgets(default=SeatBudgetConfig(hosted_tokens_per_day=1000)))
+def test_unlabeled_hosted_request_is_refused_when_budgets_exist(tmp_path: Path) -> None:
+    config = _config(
+        _budgets(default=SeatBudgetConfig(hosted_tokens_per_day=1000)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
     with _client(config) as client:
         response = _chat(client, "hosted-chat")
 
@@ -267,15 +311,21 @@ def test_unlabeled_hosted_request_is_refused_when_budgets_exist() -> None:
     assert response.json()["error"]["code"] == "seat_required"
 
 
-def test_local_requests_stay_unbudgeted_and_label_optional() -> None:
-    config = _config(_budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=0)))
+def test_local_requests_stay_unbudgeted_and_label_optional(tmp_path: Path) -> None:
+    config = _config(
+        _budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=0)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
     with _client(config) as client:
         assert _chat(client, "local-chat").status_code == 200  # no label needed
         assert _chat(client, "local-chat", seat="fable").status_code == 200  # 0-budget seat
 
 
-def test_unbudgeted_seat_fails_closed_with_403() -> None:
-    config = _config(_budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=1000)))
+def test_unbudgeted_seat_fails_closed_with_403(tmp_path: Path) -> None:
+    config = _config(
+        _budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=1000)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
     with _client(config) as client:
         response = _chat(client, "hosted-chat", seat="stranger")
 
@@ -283,8 +333,11 @@ def test_unbudgeted_seat_fails_closed_with_403() -> None:
     assert response.json()["error"]["code"] == "budget_unconfigured"
 
 
-def test_default_entry_covers_unnamed_seats() -> None:
-    config = _config(_budgets(default=SeatBudgetConfig(hosted_requests_per_day=1)))
+def test_default_entry_covers_unnamed_seats(tmp_path: Path) -> None:
+    config = _config(
+        _budgets(default=SeatBudgetConfig(hosted_requests_per_day=1)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
     with _client(config) as client:
         assert _chat(client, "hosted-chat", seat="anyone").status_code == 200
         assert _chat(client, "hosted-chat", seat="anyone").status_code == 429
@@ -352,8 +405,11 @@ grace_period = "1h"
         load_config(config_path)
 
 
-def test_budget_errors_leak_nothing_but_safe_fields() -> None:
-    config = _config(_budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=0)))
+def test_budget_errors_leak_nothing_but_safe_fields(tmp_path: Path) -> None:
+    config = _config(
+        _budgets(fable=SeatBudgetConfig(hosted_tokens_per_day=0)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
     with _client(config) as client:
         response = _chat(client, "hosted-chat", seat="fable")
 
@@ -364,3 +420,59 @@ def test_budget_errors_leak_nothing_but_safe_fields() -> None:
     assert set(payload["error"]["details"]) == {"seat", "window_resets_at", "provider"}
     assert payload["error"]["details"]["provider"] == "openai"
     assert "native-hosted" not in json.dumps(payload)  # no native model names
+
+
+def test_budgets_without_the_ledger_are_rejected() -> None:
+    """Restart-proof is a contract: budgets demand the durable ledger."""
+
+    with pytest.raises(ValueError, match=r"requires \[usage\]"):
+        _config(_budgets(default=SeatBudgetConfig(hosted_tokens_per_day=1)))
+
+
+def test_upstream_failure_releases_the_reserved_slot(tmp_path: Path) -> None:
+    """A 5xx must not consume the request cap: failures are never spend."""
+
+    config = _config(
+        _budgets(fable=SeatBudgetConfig(hosted_requests_per_day=1)),
+        ledger_path=tmp_path / "usage.jsonl",
+    )
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, json={"error": {"message": "boom"}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": None,
+            },
+        )
+
+    providers: dict[str, Provider] = {}
+    for provider_id, provider_config in config.providers.items():
+        if provider_config.type == "deterministic":
+            providers[provider_id] = DeterministicProvider(provider_id, provider_config)
+        else:
+            providers[provider_id] = OpenAICompatibleProvider(
+                provider_id,
+                provider_config,
+                client=httpx.AsyncClient(
+                    base_url=provider_config.base_url,
+                    transport=httpx.MockTransport(handler),
+                    trust_env=False,
+                ),
+            )
+    app = create_app(config, providers=providers, clock=lambda: float(NOON))
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        first = _chat(client, "hosted-chat", seat="fable")
+        second = _chat(client, "hosted-chat", seat="fable")
+        third = _chat(client, "hosted-chat", seat="fable")
+
+    assert first.status_code >= 500  # upstream failed; slot released
+    assert second.status_code == 200  # cap of 1 still available
+    assert third.status_code == 429  # now genuinely consumed

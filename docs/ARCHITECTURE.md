@@ -280,8 +280,13 @@ optional `seat` label) the caller.
   `budget_exhausted` + reset time), and never rerouted — the one-alias-one-
   provider invariant outranks convenience. `spend()` records at the same
   sites as usage; ledger replay feeds the book so allowances survive
-  restarts, with previous-day records ignored. Overshoot-by-one-request and
-  under-metering by count-omitting providers are documented, not hidden.
+  restarts, with previous-day records ignored. `check()` atomically reserves
+  the request slot (no await before the increment), `settle()` adds tokens on
+  completion, `release()` returns the slot on failure — so the request cap
+  holds under concurrency and failures never count. Token overshoot is
+  bounded by in-flight requests per seat; tracked-seat cardinality is capped
+  (4096) against label floods; `[budgets]` without `[usage]` is a config
+  error, because restart-proof allowances are the contract, not a mode.
 - **Seat attribution is optional and inert.** `seat` on chat/embedding
   requests (validated against `SEAT_PATTERN`) only adds a `by_seat` view.
   Unlabeled requests count everywhere else; the label is never forwarded
