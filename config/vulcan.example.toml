@@ -10,6 +10,11 @@ host = "127.0.0.1" # loopback only
 port = 8140
 log_level = "INFO"
 
+# Optional durable usage ledger: uncomment to make /v1/usage survive restarts.
+# One JSON line per completed request — never message content. See README.
+# [usage]
+# ledger_path = "/absolute/path/usage-ledger.jsonl"
+
 [readiness]
 # Reuse one Ollama /api/tags probe across health/models/chat for this many
 # seconds. 0 = probe every call. Max 60. Default 5 when the section is omitted.
