@@ -269,3 +269,114 @@ def test_seat_never_appears_in_upstream_embeddings_body() -> None:
     assert len(captured) == 1
     assert SEAT_SENTINEL not in captured[0].content.decode()
     assert SEAT_SENTINEL not in str(captured[0].headers)
+
+
+def _sse(*payloads: dict[str, Any]) -> httpx.Response:
+    body = "".join(f"data: {json.dumps(item)}\n\n" for item in payloads) + "data: [DONE]\n\n"
+    return httpx.Response(
+        200,
+        content=body.encode(),
+        headers={"content-type": "text/event-stream"},
+    )
+
+
+def test_seat_never_appears_in_upstream_or_downstream_stream(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ROADMAP §1.5: the streamed path gets its own sentinel, request and reply."""
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _sse(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": None},
+        )
+
+    config = _openai_config()
+    providers: dict[str, Provider] = {
+        "det": DeterministicProvider("det", config.providers["det"]),
+        "openai": OpenAICompatibleProvider(
+            "openai",
+            config.providers["openai"],
+            client=httpx.AsyncClient(
+                base_url=config.providers["openai"].base_url,
+                transport=httpx.MockTransport(handler),
+                trust_env=False,
+            ),
+        ),
+    }
+    app = create_app(config, providers=providers, clock=lambda: 1_700_000_000.0)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "hosted-chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+                "seat": SEAT_SENTINEL,
+            },
+        )
+        assert response.status_code == 200
+        streamed = response.read().decode()
+        usage_body = client.get("/v1/usage").json()
+
+    assert len(captured) == 1
+    assert SEAT_SENTINEL not in captured[0].content.decode()
+    assert SEAT_SENTINEL not in str(captured[0].headers)
+    assert SEAT_SENTINEL not in streamed
+    assert SEAT_SENTINEL not in caplog.text
+    # The stream still recorded its seat once fully drained.
+    assert [item["seat"] for item in usage_body["by_seat"]] == [SEAT_SENTINEL]
+
+
+def test_seat_never_appears_in_error_responses_or_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A labeled request that fails upstream echoes neither seat nor detail."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": {"message": "upstream boom"}})
+
+    config = _openai_config()
+    providers: dict[str, Provider] = {
+        "det": DeterministicProvider("det", config.providers["det"]),
+        "openai": OpenAICompatibleProvider(
+            "openai",
+            config.providers["openai"],
+            client=httpx.AsyncClient(
+                base_url=config.providers["openai"].base_url,
+                transport=httpx.MockTransport(handler),
+                trust_env=False,
+            ),
+        ),
+    }
+    app = create_app(config, providers=providers, clock=lambda: 1_700_000_000.0)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "hosted-chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "seat": SEAT_SENTINEL,
+            },
+        )
+        usage_body = client.get("/v1/usage").json()
+
+    assert response.status_code >= 500
+    assert SEAT_SENTINEL not in response.text
+    assert SEAT_SENTINEL not in caplog.text
+    # Failures are never usage: the seat records nothing.
+    assert usage_body["by_seat"] == []
+
+
+def test_labeled_success_logs_never_carry_the_seat(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Content-safe logs stay seat-free on the success path too."""
+
+    with _client() as client:
+        assert _chat(client, seat=SEAT_SENTINEL).status_code == 200
+
+    assert SEAT_SENTINEL not in caplog.text
