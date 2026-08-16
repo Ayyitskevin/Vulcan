@@ -223,6 +223,7 @@ def test_usage_starts_empty_and_reports_process_scope() -> None:
         },
         "by_model": [],
         "by_provider": [],
+        "by_seat": [],
     }
 
 
@@ -429,6 +430,7 @@ def test_usage_response_shape_is_strict() -> None:
         },
         "by_model": [],
         "by_provider": [],
+        "by_seat": [],
         "cost_usd": 0.0,
     }
     with pytest.raises(ValidationError):
@@ -452,6 +454,7 @@ def test_usage_json_is_stable_for_operators() -> None:
         "totals",
         "by_model",
         "by_provider",
+        "by_seat",
     }
     assert set(body["totals"]) == {
         "requests",

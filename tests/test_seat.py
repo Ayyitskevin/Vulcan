@@ -1,0 +1,271 @@
+"""Optional seat attribution: recorder, HTTP contract, and upstream sentinels.
+
+A ``seat`` is an operator-chosen caller label on chat and embedding requests.
+It exists only for ``/v1/usage`` attribution: labeled requests aggregate under
+``by_seat``, unlabeled requests still count everywhere else, and the label is
+NEVER forwarded upstream — the sentinel tests at the bottom pin that.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from vulcan.api import create_app
+from vulcan.config import (
+    Capability,
+    DeterministicProviderConfig,
+    GatewayConfig,
+    ModelConfig,
+    OpenAICompatibleProviderConfig,
+)
+from vulcan.providers.base import Provider
+from vulcan.providers.deterministic import DeterministicProvider
+from vulcan.providers.openai_compatible import OpenAICompatibleProvider
+from vulcan.usage import UsageRecorder
+
+OPENAI_KEY_ENV = "VULCAN_SEAT_TEST_OPENAI_KEY"
+OPENAI_KEY_SENTINEL = "sk-seat-openai-secret-9c41"
+SEAT_SENTINEL = "seat-must-not-escape-7b3d"
+
+
+@pytest.fixture(autouse=True)
+def _credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(OPENAI_KEY_ENV, OPENAI_KEY_SENTINEL)
+
+
+# ── Recorder unit behavior ───────────────────────────────────────────────────
+
+
+def test_recorder_aggregates_per_seat_only_when_labeled() -> None:
+    recorder = UsageRecorder()
+    recorder.record(model="a", provider="p1", prompt_tokens=3, completion_tokens=4, seat="claude")
+    recorder.record(model="a", provider="p1", prompt_tokens=1, completion_tokens=1, seat="codex")
+    recorder.record(model="a", provider="p1", prompt_tokens=10, completion_tokens=10)  # unlabeled
+
+    snapshot = recorder.snapshot()
+
+    assert snapshot.totals.requests == 3  # unlabeled requests still count overall
+    by_seat = {item.seat: item.totals for item in snapshot.by_seat}
+    assert set(by_seat) == {"claude", "codex"}
+    assert by_seat["claude"].requests == 1
+    assert by_seat["claude"].total_tokens == 7
+    assert by_seat["codex"].total_tokens == 2
+
+
+def test_recorder_seat_snapshot_is_sorted_and_stable() -> None:
+    recorder = UsageRecorder()
+    for seat in ("zeta", "alpha", "mid"):
+        recorder.record(model="a", provider="p1", seat=seat)
+
+    snapshot = recorder.snapshot()
+
+    assert [item.seat for item in snapshot.by_seat] == ["alpha", "mid", "zeta"]
+    # Snapshots are point-in-time copies: later records do not mutate them.
+    recorder.record(model="a", provider="p1", seat="alpha")
+    assert snapshot.by_seat[0].totals.requests == 1
+
+
+# ── HTTP contract ────────────────────────────────────────────────────────────
+
+
+def _config() -> GatewayConfig:
+    return GatewayConfig(
+        schema_version=2,
+        providers={
+            "det": DeterministicProviderConfig(type="deterministic", response_text="canned")
+        },
+        models=(
+            ModelConfig(
+                id="alias-one",
+                provider="det",
+                provider_model="native-one",
+                capabilities=frozenset({Capability.CHAT, Capability.EMBEDDINGS}),
+            ),
+        ),
+    )
+
+
+def _client() -> TestClient:
+    app = create_app(_config(), clock=lambda: 1_700_000_000.0)
+    return TestClient(app, base_url="http://127.0.0.1")
+
+
+def _chat(
+    client: TestClient,
+    seat: str | None = None,
+    stream: bool = False,
+) -> httpx.Response:
+    payload: dict[str, Any] = {
+        "model": "alias-one",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+    }
+    if seat is not None:
+        payload["seat"] = seat
+    return client.post("/v1/chat/completions", json=payload)
+
+
+def test_labeled_chat_and_embeddings_appear_under_their_seat() -> None:
+    with _client() as client:
+        assert _chat(client, seat="claude").status_code == 200
+        assert _chat(client, seat="claude").status_code == 200
+        embed = client.post(
+            "/v1/embeddings",
+            json={"model": "alias-one", "input": "hello", "seat": "codex"},
+        )
+        assert embed.status_code == 200
+        body = client.get("/v1/usage").json()
+
+    seats = {item["seat"]: item["totals"] for item in body["by_seat"]}
+    assert set(seats) == {"claude", "codex"}
+    assert seats["claude"]["requests"] == 2
+    assert seats["codex"]["requests"] == 1
+
+
+def test_streamed_chat_records_its_seat() -> None:
+    with _client() as client:
+        response = _chat(client, seat="kimi", stream=True)
+        assert response.status_code == 200
+        response.read()  # drain the stream so usage is recorded
+        body = client.get("/v1/usage").json()
+
+    assert [item["seat"] for item in body["by_seat"]] == ["kimi"]
+
+
+def test_unlabeled_requests_count_overall_but_never_under_a_seat() -> None:
+    with _client() as client:
+        assert _chat(client).status_code == 200
+        body = client.get("/v1/usage").json()
+
+    assert body["totals"]["requests"] == 1
+    assert body["by_seat"] == []
+
+
+@pytest.mark.parametrize(
+    "seat",
+    ["", "UPPER", "-leading-dash", "has space", "x" * 65, 7, "sneaky\nnewline"],
+)
+def test_invalid_seat_labels_are_rejected(seat: Any) -> None:
+    with _client() as client:
+        response = _chat(client, seat=seat)
+
+    assert response.status_code == 422
+
+
+def test_seat_is_rejected_on_unknown_endpoints_payloads() -> None:
+    """StrictSchema still forbids extras: seat exists only where declared."""
+
+    with _client() as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "alias-one",
+                "messages": [{"role": "user", "content": "hello"}],
+                "seat": "claude",
+                "chair": "not-a-field",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+# ── Upstream sentinels: the label never leaves the process ───────────────────
+
+
+def _openai_config() -> GatewayConfig:
+    return GatewayConfig(
+        schema_version=2,
+        providers={
+            "openai": OpenAICompatibleProviderConfig(
+                type="openai_compatible",
+                base_url="https://api.example.test/v1",
+                api_key_env=OPENAI_KEY_ENV,
+                timeout_seconds=1.0,
+            ),
+            "det": DeterministicProviderConfig(type="deterministic", response_text="canned"),
+        },
+        models=(
+            ModelConfig(
+                id="hosted-chat",
+                provider="openai",
+                provider_model="hosted-native",
+                capabilities=frozenset({Capability.CHAT, Capability.EMBEDDINGS}),
+            ),
+        ),
+    )
+
+
+def _capturing_client(captured: list[httpx.Request]) -> TestClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(
+                200,
+                json={"data": [{"index": 0, "embedding": [1.0]}], "usage": None},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": None,
+            },
+        )
+
+    config = _openai_config()
+    providers: dict[str, Provider] = {}
+    for provider_id, provider_config in config.providers.items():
+        if provider_config.type == "deterministic":
+            providers[provider_id] = DeterministicProvider(provider_id, provider_config)
+            continue
+        providers[provider_id] = OpenAICompatibleProvider(
+            provider_id,
+            provider_config,
+            client=httpx.AsyncClient(
+                base_url=provider_config.base_url,
+                transport=httpx.MockTransport(handler),
+                trust_env=False,
+            ),
+        )
+    app = create_app(config, providers=providers, clock=lambda: 1_700_000_000.0)
+    return TestClient(app, base_url="http://127.0.0.1")
+
+
+def test_seat_never_appears_in_upstream_chat_body() -> None:
+    captured: list[httpx.Request] = []
+    with _capturing_client(captured) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "hosted-chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "seat": SEAT_SENTINEL,
+            },
+        )
+        assert response.status_code == 200
+
+    assert len(captured) == 1
+    upstream = json.loads(captured[0].content.decode())
+    assert "seat" not in upstream
+    assert SEAT_SENTINEL not in captured[0].content.decode()
+    assert SEAT_SENTINEL not in str(captured[0].headers)
+
+
+def test_seat_never_appears_in_upstream_embeddings_body() -> None:
+    captured: list[httpx.Request] = []
+    with _capturing_client(captured) as client:
+        response = client.post(
+            "/v1/embeddings",
+            json={"model": "hosted-chat", "input": "hello", "seat": SEAT_SENTINEL},
+        )
+        assert response.status_code == 200
+
+    assert len(captured) == 1
+    assert SEAT_SENTINEL not in captured[0].content.decode()
+    assert SEAT_SENTINEL not in str(captured[0].headers)

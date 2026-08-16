@@ -15,6 +15,9 @@ from pydantic_core import PydanticCustomError
 
 PUBLIC_MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
 PROVIDER_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
+# Seat labels: operator-chosen caller identities on API requests (same shape as
+# provider IDs — safe, non-secret values that may appear in usage metadata).
+SEAT_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 ENV_VAR_NAME_PATTERN = r"^[A-Z][A-Z0-9_]{0,127}$"
 
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"

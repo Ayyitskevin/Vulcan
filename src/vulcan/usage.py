@@ -1,7 +1,8 @@
 """In-memory, process-lifetime usage counters.
 
 Deliberately minimal: counts of completed requests and the token counts that
-upstreams actually reported, keyed by public alias and configured provider ID.
+upstreams actually reported, keyed by public alias, configured provider ID, and (when a request
+carries one) the caller's optional seat label.
 Nothing is persisted, no costs or currencies are computed, and the counters
 reset when the process restarts — Vulcan is not a billing platform.
 
@@ -54,10 +55,17 @@ class ProviderUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class SeatUsage:
+    seat: str
+    totals: UsageTotals
+
+
+@dataclass(frozen=True, slots=True)
 class UsageSnapshot:
     totals: UsageTotals
     by_model: tuple[ModelUsage, ...]
     by_provider: tuple[ProviderUsage, ...]
+    by_seat: tuple[SeatUsage, ...]
 
 
 def _totals(counter: _Counter) -> UsageTotals:
@@ -76,6 +84,7 @@ class UsageRecorder:
 
     _by_model: dict[tuple[str, str], _Counter] = field(default_factory=dict)
     _by_provider: dict[str, _Counter] = field(default_factory=dict)
+    _by_seat: dict[str, _Counter] = field(default_factory=dict)
 
     def record(
         self,
@@ -84,6 +93,7 @@ class UsageRecorder:
         provider: str,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        seat: str | None = None,
     ) -> None:
         # Single event loop, no awaits between read and write: plain dict
         # mutation is atomic enough here and needs no lock.
@@ -91,6 +101,10 @@ class UsageRecorder:
             prompt_tokens, completion_tokens
         )
         self._by_provider.setdefault(provider, _Counter()).record(prompt_tokens, completion_tokens)
+        # Attribution is optional: unlabeled requests still count in the totals
+        # and the model/provider views, they just never appear under a seat.
+        if seat is not None:
+            self._by_seat.setdefault(seat, _Counter()).record(prompt_tokens, completion_tokens)
 
     def snapshot(self) -> UsageSnapshot:
         """A stable, sorted view of the counters at this moment."""
@@ -111,5 +125,9 @@ class UsageRecorder:
             by_provider=tuple(
                 ProviderUsage(provider=provider, totals=_totals(counter))
                 for provider, counter in sorted(self._by_provider.items())
+            ),
+            by_seat=tuple(
+                SeatUsage(seat=seat, totals=_totals(counter))
+                for seat, counter in sorted(self._by_seat.items())
             ),
         )
