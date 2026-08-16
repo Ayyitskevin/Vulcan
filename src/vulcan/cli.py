@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 
 from vulcan.api import create_app
@@ -36,6 +37,16 @@ def _parser() -> argparse.ArgumentParser:
             "credential is accepted (never automatic; values and bodies are never printed)"
         ),
     )
+    usage = subcommands.add_parser(
+        "usage",
+        help="print /v1/usage from the running gateway named by the config",
+    )
+    usage.add_argument("--config", type=Path, required=True, help="path to a Vulcan TOML config")
+    models = subcommands.add_parser(
+        "models",
+        help="print /v1/models from the running gateway named by the config",
+    )
+    models.add_argument("--config", type=Path, required=True, help="path to a Vulcan TOML config")
     return parser
 
 
@@ -111,6 +122,47 @@ def _check_report(config: GatewayConfig, *, verify: bool = False) -> tuple[dict[
     return report, (1 if credentials_missing or verification_failures else 0)
 
 
+def _gateway_client(config: GatewayConfig) -> httpx.Client:
+    """A hardened loopback client for reading the running gateway."""
+
+    return httpx.Client(
+        base_url=f"http://{config.server.host}:{config.server.port}",
+        timeout=httpx.Timeout(5.0),
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
+def _read_gateway(config: GatewayConfig, path: str) -> int:
+    """GET one gateway endpoint and pass its JSON through verbatim.
+
+    The gateway's responses are already content-safe; printing them unchanged
+    adds no new surface. Failures are sanitized: the underlying exception text
+    is never echoed, matching every other CLI error path.
+    """
+
+    try:
+        with _gateway_client(config) as client:
+            response = client.get(path)
+    except httpx.HTTPError:
+        payload = {
+            "error": {
+                "code": "gateway_unreachable",
+                "message": (
+                    "No running gateway answered at "
+                    f"http://{config.server.host}:{config.server.port}{path}. "
+                    "Start it with: vulcan serve --config <same config>."
+                ),
+                "retryable": True,
+            }
+        }
+        sys.stderr.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+        return 1
+
+    sys.stdout.write(response.text.rstrip("\n") + "\n")
+    return 0 if response.is_success else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     try:
@@ -123,6 +175,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         report, exit_code = _check_report(config, verify=args.verify_credentials)
         sys.stdout.write(json.dumps(report, separators=(",", ":"), sort_keys=True) + "\n")
         return exit_code
+
+    if args.command == "usage":
+        return _read_gateway(config, "/v1/usage")
+
+    if args.command == "models":
+        return _read_gateway(config, "/v1/models")
 
     configure_logging(config.server.log_level)
     uvicorn.run(

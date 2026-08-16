@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import uvicorn
 
@@ -374,3 +375,139 @@ def test_check_invalid_config_uses_the_same_sanitized_error(
     assert captured.out == ""
     payload = json.loads(captured.err)
     assert payload["error"]["code"] == "configuration_error"
+
+
+# ── Gateway read subcommands: usage and models ───────────────────────────────
+
+READ_ERROR_SENTINEL = "transport-detail-must-not-escape-4f19"
+
+
+def _read_config(tmp_path: Path) -> Path:
+    return _write_config(
+        tmp_path,
+        """
+        schema_version = 2
+
+        [server]
+        host = "127.0.0.1"
+        port = 8140
+
+        [providers.det]
+        type = "deterministic"
+        response_text = "canned"
+
+        [[models]]
+        id = "alias-one"
+        provider = "det"
+        provider_model = "native"
+        capabilities = ["chat"]
+        """,
+    )
+
+
+def _mock_gateway_client(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: object,
+) -> None:
+    def factory(config: object) -> httpx.Client:
+        return httpx.Client(
+            base_url="http://127.0.0.1:8140",
+            transport=httpx.MockTransport(handler),  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(cli, "_gateway_client", factory)
+
+
+def test_usage_subcommand_passes_gateway_json_through_verbatim(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = {"object": "usage", "by_seat": [{"seat": "fable", "totals": {"requests": 1}}]}
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json=body)
+
+    _mock_gateway_client(monkeypatch, handler)
+
+    exit_code = cli.main(["usage", "--config", str(_read_config(tmp_path))])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen_paths == ["/v1/usage"]
+    assert json.loads(captured.out) == body
+    assert captured.err == ""
+
+
+def test_models_subcommand_reads_v1_models(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    _mock_gateway_client(monkeypatch, handler)
+
+    exit_code = cli.main(["models", "--config", str(_read_config(tmp_path))])
+
+    assert exit_code == 0
+    assert seen_paths == ["/v1/models"]
+
+
+def test_gateway_read_failure_is_sanitized_and_names_the_fix(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(READ_ERROR_SENTINEL)
+
+    _mock_gateway_client(monkeypatch, handler)
+
+    exit_code = cli.main(["usage", "--config", str(_read_config(tmp_path))])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["error"]["code"] == "gateway_unreachable"
+    assert payload["error"]["retryable"] is True
+    assert "vulcan serve" in payload["error"]["message"]
+    # Sanitized like every other CLI error: the transport detail never escapes.
+    assert READ_ERROR_SENTINEL not in captured.err
+
+
+def test_gateway_read_passes_non_success_status_through_with_exit_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"code": "not_ready"}})
+
+    _mock_gateway_client(monkeypatch, handler)
+
+    exit_code = cli.main(["usage", "--config", str(_read_config(tmp_path))])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert json.loads(captured.out)["error"]["code"] == "not_ready"
+
+
+def test_gateway_read_with_invalid_config_uses_the_same_sanitized_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "nope.toml"
+
+    exit_code = cli.main(["usage", "--config", str(missing)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert json.loads(captured.err)["error"]["code"] == "configuration_error"
