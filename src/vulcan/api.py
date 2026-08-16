@@ -205,6 +205,7 @@ def create_app(
     if id_factory is not None:
         gateway_kwargs["id_factory"] = id_factory
     usage_scope = "process"
+    ledger: UsageLedger | None = None
     started_at = int(clock())
     if config.usage is not None:
         # Fail-loud by design: an unopenable ledger raises LedgerError here
@@ -221,6 +222,8 @@ def create_app(
         yield
         for provider in selected_providers.values():
             await provider.aclose()
+        if ledger is not None:
+            ledger.close()
 
     app = FastAPI(
         title="Vulcan Local Inference Gateway",

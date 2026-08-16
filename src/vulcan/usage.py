@@ -15,13 +15,88 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
+from vulcan.config import PROVIDER_ID_PATTERN, PUBLIC_MODEL_PATTERN, SEAT_PATTERN
+
 logger = logging.getLogger("vulcan.usage")
+
+_MODEL_RE = re.compile(PUBLIC_MODEL_PATTERN)
+_PROVIDER_RE = re.compile(PROVIDER_ID_PATTERN)
+_SEAT_RE = re.compile(SEAT_PATTERN)
+_MAX_TOKENS = 10**12
+
+
+def _valid_ledger_record(record: object) -> bool:
+    """Only lines that would have been legal to WRITE are legal to READ.
+
+    Replayed values reach the HTTP response models, so the ledger file is a
+    trust boundary: negative counts, pattern-violating names, or injected
+    text must become ``skipped_lines``, never counters or response fields.
+    """
+
+    if not isinstance(record, dict):
+        return False
+    ts = record.get("ts")
+    model = record.get("model")
+    provider = record.get("provider")
+    seat = record.get("seat")
+    if not (isinstance(ts, int) and not isinstance(ts, bool) and ts >= 0):
+        return False
+    if not (isinstance(model, str) and _MODEL_RE.fullmatch(model)):
+        return False
+    if not (isinstance(provider, str) and _PROVIDER_RE.fullmatch(provider)):
+        return False
+    if seat is not None and not (isinstance(seat, str) and _SEAT_RE.fullmatch(seat)):
+        return False
+    for key in ("prompt_tokens", "completion_tokens"):
+        value = record.get(key)
+        if value is None:
+            continue
+        if not (
+            isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_TOKENS
+        ):
+            return False
+    return True
+
+
+_MODEL_RE = re.compile(PUBLIC_MODEL_PATTERN)
+_PROVIDER_RE = re.compile(PROVIDER_ID_PATTERN)
+_SEAT_RE = re.compile(SEAT_PATTERN)
+# Ledger entries feed HTTP response models on replay, so the file is a trust
+# boundary: only lines that would have been legal to WRITE are legal to READ.
+_MAX_TOKENS = 10**12
+
+
+def _valid_ledger_record(record: object) -> bool:
+    if not isinstance(record, dict):
+        return False
+    ts = record.get("ts")
+    model = record.get("model")
+    provider = record.get("provider")
+    seat = record.get("seat")
+    if not (isinstance(ts, int) and not isinstance(ts, bool) and ts >= 0):
+        return False
+    if not (isinstance(model, str) and _MODEL_RE.fullmatch(model)):
+        return False
+    if not (isinstance(provider, str) and _PROVIDER_RE.fullmatch(provider)):
+        return False
+    if seat is not None and not (isinstance(seat, str) and _SEAT_RE.fullmatch(seat)):
+        return False
+    for key in ("prompt_tokens", "completion_tokens"):
+        value = record.get(key)
+        if value is None:
+            continue
+        if not (
+            isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_TOKENS
+        ):
+            return False
+    return True
 
 
 class LedgerError(Exception):
@@ -96,9 +171,6 @@ class UsageSnapshot:
     ledger: LedgerStats | None = None
 
 
-_LEDGER_REQUIRED_KEYS = frozenset({"ts", "model", "provider"})
-
-
 class UsageLedger:
     """Append-only JSONL ledger of completed requests.
 
@@ -129,27 +201,28 @@ class UsageLedger:
         self._replayed: list[dict[str, object]] = []
         if not self._path.exists():
             return
-        with self._path.open("r", encoding="utf-8") as handle:
-            for raw in handle:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    record = json.loads(raw)
-                except ValueError:
-                    # A torn or foreign line is skipped and counted, never guessed at.
-                    self.stats.skipped_lines += 1
-                    continue
-                if not isinstance(record, dict) or not set(record) >= _LEDGER_REQUIRED_KEYS:
-                    self.stats.skipped_lines += 1
-                    continue
-                self._replayed.append(record)
-                self.stats.replayed_requests += 1
-                ts = record.get("ts")
-                if isinstance(ts, int) and (
-                    self.stats.earliest_ts is None or ts < self.stats.earliest_ts
-                ):
-                    self.stats.earliest_ts = ts
+        # Bytes first, decoded per line: one undecodable line is one skipped
+        # line, never a startup crash (UnicodeDecodeError is not an OSError).
+        for raw_line in self._path.read_bytes().split(b"\n"):
+            if not raw_line.strip():
+                continue
+            try:
+                record = json.loads(raw_line.decode("utf-8").strip())
+            except (UnicodeDecodeError, ValueError):
+                # A torn, foreign, or undecodable line is skipped and counted,
+                # never guessed at.
+                self.stats.skipped_lines += 1
+                continue
+            if not _valid_ledger_record(record):
+                self.stats.skipped_lines += 1
+                continue
+            self._replayed.append(record)
+            self.stats.replayed_requests += 1
+            ts = record["ts"]
+            if isinstance(ts, int) and (
+                self.stats.earliest_ts is None or ts < self.stats.earliest_ts
+            ):
+                self.stats.earliest_ts = ts
 
     def append(
         self,

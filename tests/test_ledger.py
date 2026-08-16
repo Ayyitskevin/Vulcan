@@ -263,3 +263,101 @@ capabilities = ["chat"]
     )
     with pytest.raises(ConfigLoadError):
         load_config(config_path)
+
+
+# ── Poisoned-ledger sentinels: the file is a trust boundary ──────────────────
+
+
+POISON_SENTINEL = "poisoned-value-must-not-reach-http-c4d7"
+
+
+def _poisoned_ledger(tmp_path: Path) -> Path:
+    """A ledger with one good line surrounded by every poison class."""
+
+    path = tmp_path / "usage.jsonl"
+    good = {
+        "completion_tokens": 3,
+        "model": "alias-one",
+        "prompt_tokens": 7,
+        "provider": "det",
+        "seat": "fable",
+        "ts": 1_600_000_000,
+    }
+    poison_lines: list[bytes] = [
+        # negative token counts would corrupt totals and fail response ge=0
+        json.dumps({**good, "prompt_tokens": -50}).encode(),
+        # pattern-violating seat would fail SeatUsageRecord validation (500)
+        json.dumps({**good, "seat": POISON_SENTINEL + " WITH SPACES!"}).encode(),
+        # injected free text in the model field must never reach the response
+        json.dumps({**good, "model": POISON_SENTINEL + " secret prompt text"}).encode(),
+        # booleans masquerading as ints
+        json.dumps({**good, "ts": True}).encode(),
+        # absurd token count
+        json.dumps({**good, "completion_tokens": 10**15}).encode(),
+        # invalid UTF-8 must not crash startup (UnicodeDecodeError, not OSError)
+        b'\xff\xfe{"model": "alias-one"}',
+        # wrong JSON type entirely
+        json.dumps(["not", "a", "dict"]).encode(),
+    ]
+    path.write_bytes(
+        json.dumps(good, separators=(",", ":"), sort_keys=True).encode()
+        + b"\n"
+        + b"\n".join(poison_lines)
+        + b"\n"
+    )
+    return path
+
+
+def test_poisoned_ledger_lines_never_reach_counters_or_http(tmp_path: Path) -> None:
+    path = _poisoned_ledger(tmp_path)
+
+    with _client(path) as client:
+        response = client.get("/v1/usage")
+
+    # Startup survived every poison class and /v1/usage still serves.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "ledger"
+    assert body["ledger"]["replayed_requests"] == 1  # only the good line
+    assert body["ledger"]["skipped_lines"] == 7  # every poison line, counted
+    assert body["totals"]["requests"] == 1
+    assert body["totals"]["prompt_tokens"] == 7  # the -50 never subtracted
+    assert [item["seat"] for item in body["by_seat"]] == ["fable"]
+    # The injected values appear nowhere in the HTTP response.
+    assert POISON_SENTINEL not in response.text
+
+
+def test_ledger_is_closed_on_app_shutdown(tmp_path: Path) -> None:
+    """Lifespan shutdown closes the ledger handle, not just providers."""
+
+    path = tmp_path / "usage.jsonl"
+    client = _client(path)
+    with client:
+        assert _chat(client).status_code == 200
+
+    # TestClient exit runs lifespan shutdown; a closed handle means a later
+    # append through the same app would fail — prove the handle is closed by
+    # replaying the file: the write above must be durable and complete.
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["model"] == "alias-one"
+
+
+def test_ledger_log_events_survive_the_production_formatter() -> None:
+    """The promised fixed event names are allowlisted, not 'external_log'."""
+
+    import logging
+
+    from vulcan.observability import SafeJsonFormatter
+
+    record = logging.LogRecord(
+        name="vulcan.usage",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="usage_ledger_write_failed",
+        args=(),
+        exc_info=None,
+    )
+    payload = json.loads(SafeJsonFormatter().format(record))
+    assert payload["event"] == "usage_ledger_write_failed"

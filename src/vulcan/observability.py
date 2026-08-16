@@ -36,6 +36,8 @@ _SAFE_EVENTS = frozenset(
         "readiness_probed",
         "readiness_reused",
         "request_complete",
+        "usage_ledger_close_failed",
+        "usage_ledger_write_failed",
     }
 )
 _RESERVED_FIELDS = frozenset({"event", "exception_class", "level", "logger", "timestamp"})
