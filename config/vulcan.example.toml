@@ -15,6 +15,12 @@ log_level = "INFO"
 # [usage]
 # ledger_path = "/absolute/path/usage-ledger.jsonl"
 
+# Optional per-seat daily budgets for HOSTED providers (fail-closed; local
+# providers are never budgeted). See README "Per-seat daily budgets".
+# [budgets.seats.default]
+# hosted_tokens_per_day = 100000
+# hosted_requests_per_day = 500
+
 [readiness]
 # Reuse one Ollama /api/tags probe across health/models/chat for this many
 # seconds. 0 = probe every call. Max 60. Default 5 when the section is omitted.

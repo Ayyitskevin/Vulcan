@@ -260,6 +260,17 @@ class LedgerRecord(StrictSchema):
     write_failures: int = Field(ge=0)
 
 
+class SeatBudgetRecord(StrictSchema):
+    """Operator-visible budget state for one seat, present when budgets are on."""
+
+    seat: str = Field(pattern=SEAT_PATTERN)
+    hosted_tokens_per_day: int | None = Field(default=None, ge=0)
+    hosted_requests_per_day: int | None = Field(default=None, ge=0)
+    tokens_today: int = Field(ge=0)
+    requests_today: int = Field(ge=0)
+    window_resets_at: int = Field(ge=0)
+
+
 class UsageResponse(StrictSchema):
     object: Literal["usage"] = "usage"
     # "process": in-memory counters since this process started (the default).
@@ -271,6 +282,7 @@ class UsageResponse(StrictSchema):
     by_provider: tuple[ProviderUsageRecord, ...]
     by_seat: tuple[SeatUsageRecord, ...]
     ledger: LedgerRecord | None = None
+    budgets: tuple[SeatBudgetRecord, ...] | None = None
 
 
 class ValidationIssue(StrictSchema):

@@ -398,7 +398,35 @@ Deliberate limits, so this stays infrastructure rather than a billing system:
   interpretable. Embeddings report prompt tokens only.
 - **No costs, prices, or currencies.**
 - **Seats are labels, not identities.** `seat` is voluntary caller metadata
-  for attribution — it is not authentication, and nothing enforces it.
+  for attribution — it is not authentication. Budgets (below) therefore guard
+  against accidents, not adversaries.
+
+### Per-seat daily budgets (hosted only)
+
+```toml
+[budgets.seats.default]
+hosted_tokens_per_day = 100000
+hosted_requests_per_day = 500   # backstop for providers that omit token counts
+[budgets.seats.fable]
+hosted_tokens_per_day = 500000
+```
+
+When the `[budgets]` section exists, requests to **hosted** providers are
+gated before the upstream call: they must carry a `seat`, the seat must
+resolve to an entry (its own or `default` — fail-closed otherwise), and the
+seat must have headroom in the current UTC day. Over budget → `429
+budget_exhausted` (retryable) with `details.window_resets_at`; unlabeled →
+`400 seat_required`; unbudgeted seat → `403 budget_unconfigured`. **Vulcan
+never reroutes an over-budget request to another provider** — one alias, one
+provider, always; the caller owns any fallback decision. Local providers are
+never budgeted, and without the section behavior is unchanged.
+
+Budgets pair with the durable ledger: spend replays at startup, so a restart
+never resets an allowance. Known, documented imperfections: a single in-flight
+request may overshoot its remaining budget (token counts arrive after
+completion), and providers that omit counts under-meter — the request cap is
+the backstop. `/v1/usage` gains a `budgets` array with per-seat
+limits/spend/reset when enabled.
 
 All request failures use the same envelope and include a generated `X-Request-ID`
 response header. Validation details contain only field paths and reason codes;

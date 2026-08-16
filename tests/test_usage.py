@@ -225,6 +225,7 @@ def test_usage_starts_empty_and_reports_process_scope() -> None:
         "by_provider": [],
         "by_seat": [],
         "ledger": None,
+        "budgets": None,
     }
 
 
@@ -457,6 +458,7 @@ def test_usage_json_is_stable_for_operators() -> None:
         "by_provider",
         "by_seat",
         "ledger",
+        "budgets",
     }
     assert set(body["totals"]) == {
         "requests",

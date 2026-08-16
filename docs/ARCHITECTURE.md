@@ -272,6 +272,16 @@ optional `seat` label) the caller.
   `ledger.write_failures` and logs a fixed-name ERROR — loud but non-fatal,
   because the request already succeeded. `ValueError` is caught alongside
   `OSError` there: a closed handle raises the former.
+- **Budgets are a pre-flight gate, never a router (operator-approved
+  2026-08).** `BudgetBook` (vulcan/budgets.py) holds per-seat UTC-day windows
+  against `[budgets.seats.*]` limits, hosted providers only. `check()` runs
+  after provider selection and before the upstream call in all three paths;
+  refusals are loud, typed (`seat_required` / `budget_unconfigured` /
+  `budget_exhausted` + reset time), and never rerouted — the one-alias-one-
+  provider invariant outranks convenience. `spend()` records at the same
+  sites as usage; ledger replay feeds the book so allowances survive
+  restarts, with previous-day records ignored. Overshoot-by-one-request and
+  under-metering by count-omitting providers are documented, not hidden.
 - **Seat attribution is optional and inert.** `seat` on chat/embedding
   requests (validated against `SEAT_PATTERN`) only adds a `by_seat` view.
   Unlabeled requests count everywhere else; the label is never forwarded
