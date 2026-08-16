@@ -8,6 +8,7 @@ counted and reported, never guessed at.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -263,3 +264,176 @@ capabilities = ["chat"]
     )
     with pytest.raises(ConfigLoadError):
         load_config(config_path)
+
+
+# ── Poisoned-ledger sentinels: the file is a trust boundary ──────────────────
+
+
+POISON_SENTINEL = "poisoned-value-must-not-reach-http-c4d7"
+
+
+def _poisoned_ledger(tmp_path: Path) -> Path:
+    """A ledger with one good line surrounded by every poison class."""
+
+    path = tmp_path / "usage.jsonl"
+    good = {
+        "completion_tokens": 3,
+        "model": "alias-one",
+        "prompt_tokens": 7,
+        "provider": "det",
+        "seat": "fable",
+        "ts": 1_600_000_000,
+    }
+    poison_lines: list[bytes] = [
+        # negative token counts would corrupt totals and fail response ge=0
+        json.dumps({**good, "prompt_tokens": -50}).encode(),
+        # pattern-violating seat would fail SeatUsageRecord validation (500)
+        json.dumps({**good, "seat": POISON_SENTINEL + " WITH SPACES!"}).encode(),
+        # injected free text in the model field must never reach the response
+        json.dumps({**good, "model": POISON_SENTINEL + " secret prompt text"}).encode(),
+        # booleans masquerading as ints
+        json.dumps({**good, "ts": True}).encode(),
+        # absurd token count
+        json.dumps({**good, "completion_tokens": 10**15}).encode(),
+        # invalid UTF-8 must not crash startup (UnicodeDecodeError, not OSError)
+        b'\xff\xfe{"model": "alias-one"}',
+        # wrong JSON type entirely
+        json.dumps(["not", "a", "dict"]).encode(),
+        # forged minimal line: valid-looking but missing the token/seat keys
+        json.dumps({"model": "alias-one", "provider": "det", "ts": 1}).encode(),
+        # smuggled extra key: the exact write schema admits no additions
+        json.dumps({**good, "note": POISON_SENTINEL}).encode(),
+    ]
+    path.write_bytes(
+        json.dumps(good, separators=(",", ":"), sort_keys=True).encode()
+        + b"\n"
+        + b"\n".join(poison_lines)
+        + b"\n"
+    )
+    return path
+
+
+def test_poisoned_ledger_lines_never_reach_counters_or_http(tmp_path: Path) -> None:
+    path = _poisoned_ledger(tmp_path)
+
+    with _client(path) as client:
+        response = client.get("/v1/usage")
+
+    # Startup survived every poison class and /v1/usage still serves.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "ledger"
+    assert body["ledger"]["replayed_requests"] == 1  # only the good line
+    assert body["ledger"]["skipped_lines"] == 9  # every poison line, counted
+    assert body["totals"]["requests"] == 1
+    assert body["totals"]["prompt_tokens"] == 7  # the -50 never subtracted
+    assert [item["seat"] for item in body["by_seat"]] == ["fable"]
+    # The injected values appear nowhere in the HTTP response.
+    assert POISON_SENTINEL not in response.text
+
+
+def test_second_gateway_on_the_same_ledger_fails_loud(tmp_path: Path) -> None:
+    """One gateway per ledger file is enforced by flock, not just documented."""
+
+    path = tmp_path / "usage.jsonl"
+    first = UsageLedger(path, clock=lambda: 0.0)
+
+    with pytest.raises(LedgerError):
+        UsageLedger(path, clock=lambda: 0.0)
+
+    first.close()
+    # The lock dies with the handle: a successor opens cleanly.
+    UsageLedger(path, clock=lambda: 0.0).close()
+
+
+def test_ledger_is_closed_on_app_shutdown(tmp_path: Path) -> None:
+    """Lifespan shutdown releases the ledger (proven via the flock)."""
+
+    path = tmp_path / "usage.jsonl"
+    with _client(path) as client:
+        assert _chat(client).status_code == 200
+
+    # If shutdown had leaked the handle, this open would raise LedgerError.
+    successor = UsageLedger(path, clock=lambda: 0.0)
+    UsageRecorder.with_ledger(successor)  # replay is explicit now
+    assert successor.stats.replayed_requests == 1
+    successor.close()
+
+
+def test_ledger_closes_even_when_a_provider_aclose_fails(tmp_path: Path) -> None:
+    """A provider shutdown exception must not orphan the ledger handle."""
+
+    from vulcan.providers.deterministic import DeterministicProvider
+
+    class _ExplodingProvider(DeterministicProvider):
+        async def aclose(self) -> None:
+            raise RuntimeError("provider shutdown failure")
+
+    path = tmp_path / "usage.jsonl"
+    config = _config(path)
+    provider = _ExplodingProvider("det", config.providers["det"])
+    app = create_app(config, providers={"det": provider}, clock=lambda: 1_700_000_000.0)
+
+    with (
+        contextlib.suppress(RuntimeError),
+        TestClient(app, base_url="http://127.0.0.1") as client,
+    ):
+        assert _chat(client).status_code == 200
+
+    # The finally path released the flock despite the provider explosion.
+    successor = UsageLedger(path, clock=lambda: 0.0)
+    UsageRecorder.with_ledger(successor)
+    assert successor.stats.replayed_requests == 1
+    successor.close()
+
+
+def test_ledger_log_events_survive_the_production_formatter() -> None:
+    """The promised fixed event names are allowlisted, not 'external_log'."""
+
+    import logging
+
+    from vulcan.observability import SafeJsonFormatter
+
+    record = logging.LogRecord(
+        name="vulcan.usage",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="usage_ledger_write_failed",
+        args=(),
+        exc_info=None,
+    )
+    payload = json.loads(SafeJsonFormatter().format(record))
+    assert payload["event"] == "usage_ledger_write_failed"
+
+
+def test_oversized_line_is_skipped_in_bounded_chunks(tmp_path: Path) -> None:
+    """A single huge unterminated line never buffers whole and never counts."""
+
+    path = tmp_path / "usage.jsonl"
+    good = (
+        '{"completion_tokens":1,"model":"alias-one","prompt_tokens":1,'
+        '"provider":"det","seat":null,"ts":5}'
+    )
+    # 1 MiB single line with no newline until the end, then a good line.
+    path.write_bytes(b'{"model": "' + b"x" * (1 << 20) + b'"}\n' + good.encode() + b"\n")
+
+    ledger = UsageLedger(path, clock=lambda: 0.0)
+    recorder = UsageRecorder.with_ledger(ledger)
+    ledger.close()
+
+    assert ledger.stats.skipped_lines == 1  # counted once, not per chunk
+    assert ledger.stats.replayed_requests == 1  # the good line after survives
+    assert recorder.snapshot().totals.requests == 1
+
+
+def test_replay_is_once_only(tmp_path: Path) -> None:
+    """A second replay would double-count, so it raises instead."""
+
+    path = tmp_path / "usage.jsonl"
+    ledger = UsageLedger(path, clock=lambda: 0.0)
+    UsageRecorder.with_ledger(ledger)
+
+    with pytest.raises(RuntimeError, match="once-only"):
+        ledger.replay(lambda record: None)
+    ledger.close()
