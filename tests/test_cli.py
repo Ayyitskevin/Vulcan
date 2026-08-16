@@ -511,3 +511,95 @@ def test_gateway_read_with_invalid_config_uses_the_same_sanitized_error(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert json.loads(captured.err)["error"]["code"] == "configuration_error"
+
+
+def _ipv6_config(tmp_path: Path) -> Path:
+    return _write_config(
+        tmp_path,
+        """
+        schema_version = 2
+
+        [server]
+        host = "::1"
+        port = 8140
+
+        [providers.det]
+        type = "deterministic"
+        response_text = "canned"
+
+        [[models]]
+        id = "alias-one"
+        provider = "det"
+        provider_model = "native"
+        capabilities = ["chat"]
+        """,
+        name="vulcan6.toml",
+    )
+
+
+def test_gateway_client_is_hardened_and_ipv6_safe(tmp_path: Path) -> None:
+    """The REAL client factory, unmocked: base URL, hardening, IPv6 brackets."""
+
+    from vulcan.config import load_config
+
+    ipv4 = load_config(_read_config(tmp_path))
+    with cli._gateway_client(ipv4) as client:
+        assert str(client.base_url) == "http://127.0.0.1:8140"
+        assert client.timeout == httpx.Timeout(5.0)
+        assert client.trust_env is False
+        assert client.follow_redirects is False
+
+    ipv6 = load_config(_ipv6_config(tmp_path))
+    with cli._gateway_client(ipv6) as client:
+        # ::1 must be bracketed: http://::1:8140 raises httpx.InvalidURL.
+        assert str(client.base_url) == "http://[::1]:8140"
+
+
+def test_ipv6_config_reads_the_gateway_end_to_end(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() with an IPv6-loopback config: the URL builds and the read works."""
+
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, json={"object": "usage"})
+
+    real_factory = cli._gateway_client
+
+    def factory(config: object) -> httpx.Client:
+        real = real_factory(config)  # type: ignore[arg-type]
+        base = str(real.base_url)
+        real.close()
+        return httpx.Client(base_url=base, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(cli, "_gateway_client", factory)
+
+    exit_code = cli.main(["usage", "--config", str(_ipv6_config(tmp_path))])
+
+    assert exit_code == 0
+    assert seen_urls == ["http://[::1]:8140/v1/usage"]
+
+
+def test_invalid_url_from_client_construction_is_sanitized(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense in depth: InvalidURL is not an HTTPError and must not traceback."""
+
+    def factory(config: object) -> httpx.Client:
+        raise httpx.InvalidURL(f"Invalid port: '{READ_ERROR_SENTINEL}'")
+
+    monkeypatch.setattr(cli, "_gateway_client", factory)
+
+    exit_code = cli.main(["usage", "--config", str(_read_config(tmp_path))])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    payload = json.loads(captured.err)
+    assert payload["error"]["code"] == "gateway_unreachable"
+    assert READ_ERROR_SENTINEL not in captured.err

@@ -122,11 +122,24 @@ def _check_report(config: GatewayConfig, *, verify: bool = False) -> tuple[dict[
     return report, (1 if credentials_missing or verification_failures else 0)
 
 
+def _gateway_base_url(config: GatewayConfig) -> str:
+    """The running gateway's base URL, IPv6-safe.
+
+    ServerConfig accepts the IPv6 loopback ``::1``, which must be bracketed
+    in a URL — ``http://::1:8140`` is invalid, ``http://[::1]:8140`` is not.
+    """
+
+    host = config.server.host
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{config.server.port}"
+
+
 def _gateway_client(config: GatewayConfig) -> httpx.Client:
     """A hardened loopback client for reading the running gateway."""
 
     return httpx.Client(
-        base_url=f"http://{config.server.host}:{config.server.port}",
+        base_url=_gateway_base_url(config),
         timeout=httpx.Timeout(5.0),
         trust_env=False,
         follow_redirects=False,
@@ -144,13 +157,14 @@ def _read_gateway(config: GatewayConfig, path: str) -> int:
     try:
         with _gateway_client(config) as client:
             response = client.get(path)
-    except httpx.HTTPError:
+    # InvalidURL is not an HTTPError; catching it keeps the sanitization
+    # guarantee total even if a future host form slips past _gateway_base_url.
+    except (httpx.HTTPError, httpx.InvalidURL):
         payload = {
             "error": {
                 "code": "gateway_unreachable",
                 "message": (
-                    "No running gateway answered at "
-                    f"http://{config.server.host}:{config.server.port}{path}. "
+                    f"No running gateway answered at {_gateway_base_url(config)}{path}. "
                     "Start it with: vulcan serve --config <same config>."
                 ),
                 "retryable": True,
