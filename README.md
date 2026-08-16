@@ -147,6 +147,12 @@ A new OpenAI-compatible vendor needs no application code: add another
   1. This is the only place Vulcan calls an authenticated endpoint outside serving
   a client request, and it happens solely because an operator asked for it —
   `/healthz`, `/v1/models`, and readiness never do.
+- `uv run vulcan usage --config vulcan.toml` and
+  `uv run vulcan models --config vulcan.toml` read `/v1/usage` and `/v1/models`
+  from the **running** gateway named by the config and print its JSON verbatim
+  (already content-safe). Exit codes: 0 = success, 1 = gateway unreachable or a
+  non-success response (the sanitized error names the fix), 2 = invalid
+  configuration. Loopback only, like everything else.
 
 ### Migrating from schema v1
 
