@@ -262,6 +262,16 @@ optional `seat` label) the caller.
   credential is involved.
 - **No locking needed.** Increments happen on one event loop with no await
   between read and write.
+- **The durable ledger is opt-in and honest (operator-requested 2026-08).**
+  `[usage] ledger_path` turns the recorder into ledger scope: append-only
+  JSONL (alias/provider/seat/tokens/ts, never content or native names),
+  replayed into counters at startup, `started_at` = earliest entry. Failure
+  policy is asymmetric on purpose: an unopenable ledger kills startup
+  (`LedgerError` → CLI `ledger_error`, never a silent in-memory fallback),
+  while a failed append after a completed request increments
+  `ledger.write_failures` and logs a fixed-name ERROR — loud but non-fatal,
+  because the request already succeeded. `ValueError` is caught alongside
+  `OSError` there: a closed handle raises the former.
 - **Seat attribution is optional and inert.** `seat` on chat/embedding
   requests (validated against `SEAT_PATTERN`) only adds a `by_seat` view.
   Unlabeled requests count everywhere else; the label is never forwarded

@@ -38,6 +38,7 @@ from vulcan.schemas import (
     ErrorBody,
     ErrorEnvelope,
     HealthResponse,
+    LedgerRecord,
     ModelListResponse,
     ModelRecord,
     ModelUsageRecord,
@@ -48,7 +49,7 @@ from vulcan.schemas import (
     UsageTotalsRecord,
     ValidationIssue,
 )
-from vulcan.usage import UsageTotals
+from vulcan.usage import UsageLedger, UsageRecorder, UsageTotals
 
 logger = logging.getLogger("vulcan.api")
 
@@ -203,8 +204,17 @@ def create_app(
     }
     if id_factory is not None:
         gateway_kwargs["id_factory"] = id_factory
-    gateway = Gateway(registry, selected_providers, **gateway_kwargs)
+    usage_scope = "process"
     started_at = int(clock())
+    if config.usage is not None:
+        # Fail-loud by design: an unopenable ledger raises LedgerError here
+        # rather than silently degrading to in-memory counters.
+        ledger = UsageLedger(config.usage.ledger_path, clock=clock)
+        gateway_kwargs["usage"] = UsageRecorder.with_ledger(ledger)
+        usage_scope = "ledger"
+        if ledger.stats.earliest_ts is not None:
+            started_at = min(started_at, ledger.stats.earliest_ts)
+    gateway = Gateway(registry, selected_providers, **gateway_kwargs)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -459,7 +469,15 @@ def create_app(
         """
 
         snapshot = gateway.usage_snapshot()
+        ledger_record = None
+        if snapshot.ledger is not None:
+            ledger_record = LedgerRecord(
+                replayed_requests=snapshot.ledger.replayed_requests,
+                skipped_lines=snapshot.ledger.skipped_lines,
+                write_failures=snapshot.ledger.write_failures,
+            )
         return UsageResponse(
+            scope=usage_scope,  # type: ignore[arg-type]
             started_at=started_at,
             totals=_usage_totals(snapshot.totals),
             by_model=tuple(
@@ -478,6 +496,7 @@ def create_app(
                 SeatUsageRecord(seat=item.seat, totals=_usage_totals(item.totals))
                 for item in snapshot.by_seat
             ),
+            ledger=ledger_record,
         )
 
     return app

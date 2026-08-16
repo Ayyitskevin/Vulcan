@@ -372,8 +372,25 @@ forwarded upstream or logged with content. No budgets are enforced.
 
 Deliberate limits, so this stays infrastructure rather than a billing system:
 
-- **In-memory and process-scoped.** Counters reset on restart; nothing is
-  persisted anywhere.
+- **In-memory and process-scoped by default.** Counters reset on restart and
+  nothing is persisted — unless the operator opts into the durable ledger:
+
+  ```toml
+  [usage]
+  ledger_path = "/absolute/path/usage-ledger.jsonl"
+  ```
+
+  With the section present, every completed request appends one JSON line
+  (timestamp, alias, provider, optional seat, reported token counts — never
+  message content, never provider-native model names) and the counters replay
+  the file at startup, so `/v1/usage` reports `"scope": "ledger"` and survives
+  restarts. A `ledger` object carries honesty counters (`replayed_requests`,
+  `skipped_lines`, `write_failures`); torn lines are skipped and counted, an
+  unopenable ledger fails startup loudly (`ledger_error`, exit 2) rather than
+  silently falling back to memory, and a failed append is counted and logged
+  but never fails the already-completed request. Writes are flushed per line,
+  not fsynced: a hard power cut may lose the tail. One gateway per ledger
+  file.
 - **Completed requests only.** A failed request is never counted as usage —
   Vulcan cannot know whether a failed upstream call consumed tokens.
 - **No invented tokens.** Providers that omit token counts contribute a request

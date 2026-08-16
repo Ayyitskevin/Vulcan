@@ -252,14 +252,25 @@ class SeatUsageRecord(StrictSchema):
     totals: UsageTotalsRecord
 
 
+class LedgerRecord(StrictSchema):
+    """Honesty counters for the durable ledger, present only when enabled."""
+
+    replayed_requests: int = Field(ge=0)
+    skipped_lines: int = Field(ge=0)
+    write_failures: int = Field(ge=0)
+
+
 class UsageResponse(StrictSchema):
     object: Literal["usage"] = "usage"
-    scope: Literal["process"] = "process"
+    # "process": in-memory counters since this process started (the default).
+    # "ledger": counters replayed from the durable ledger plus this process.
+    scope: Literal["process", "ledger"] = "process"
     started_at: int = Field(ge=0)
     totals: UsageTotalsRecord
     by_model: tuple[ModelUsageRecord, ...]
     by_provider: tuple[ProviderUsageRecord, ...]
     by_seat: tuple[SeatUsageRecord, ...]
+    ledger: LedgerRecord | None = None
 
 
 class ValidationIssue(StrictSchema):

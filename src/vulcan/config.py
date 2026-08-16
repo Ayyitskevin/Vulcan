@@ -223,10 +223,31 @@ class ReadinessConfig(StrictConfigModel):
         return value
 
 
+class UsageConfig(StrictConfigModel):
+    """Optional durable usage ledger (operator-requested 2026-08-16).
+
+    When present, every completed request appends one JSON line to
+    ``ledger_path`` (timestamp, alias, provider, optional seat, token counts —
+    never message content, never native model names) and the counters replay
+    the file at startup, so ``/v1/usage`` survives restarts. One gateway per
+    ledger file; the section absent means exactly the old in-memory behavior.
+    """
+
+    ledger_path: Path
+
+    @field_validator("ledger_path")
+    @classmethod
+    def ledger_path_must_be_absolute(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("usage.ledger_path must be an absolute path")
+        return value
+
+
 class GatewayConfig(StrictConfigModel):
     schema_version: Literal[2]
     server: ServerConfig = Field(default_factory=ServerConfig)
     readiness: ReadinessConfig = Field(default_factory=ReadinessConfig)
+    usage: UsageConfig | None = None
     providers: dict[str, ProviderConfig] = Field(min_length=1)
     models: tuple[ModelConfig, ...] = Field(min_length=1)
 

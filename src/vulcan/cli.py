@@ -17,6 +17,7 @@ from vulcan.api import create_app
 from vulcan.config import HOSTED_PROVIDER_TYPES, ConfigLoadError, GatewayConfig, load_config
 from vulcan.observability import configure_logging
 from vulcan.providers.http import credential_available, verify_hosted_credential
+from vulcan.usage import LedgerError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -197,8 +198,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _read_gateway(config, "/v1/models")
 
     configure_logging(config.server.log_level)
+    try:
+        app = create_app(config)
+    except LedgerError as exc:
+        payload = {
+            "error": {
+                "code": "ledger_error",
+                "message": (
+                    f"The usage ledger at {exc.path} could not be opened "
+                    f"({exc.reason}). Fix the path or remove the [usage] "
+                    "section; Vulcan never silently falls back to in-memory "
+                    "counters."
+                ),
+                "retryable": False,
+            }
+        }
+        sys.stderr.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+        return 2
     uvicorn.run(
-        create_app(config),
+        app,
         host=config.server.host,
         port=config.server.port,
         access_log=False,
