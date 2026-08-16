@@ -630,3 +630,42 @@ def test_stream_closed_at_first_yield_releases_the_slot() -> None:
 
     # The abandoned stream never settled; its slot must be back.
     assert book.check(seat="fable", provider_id="hosted") is not None
+
+
+def test_final_chunk_abandonment_still_settles_and_meters() -> None:
+    """Disconnect at the terminal yield: upstream completed, so spend counts.
+
+    The accounting commits BEFORE the final chunk is yielded — repeated
+    final-chunk abandonment must never evade the budget or the meter.
+    """
+
+    import asyncio
+
+    from vulcan.schemas import ChatCompletionRequest
+
+    book = _book(limits={"fable": SeatLimits(None, 1)})
+    gateway = _direct_gateway(_StubHosted(), book)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "hosted-chat",
+            "messages": [{"role": "user", "content": "x"}],
+            "seat": "fable",
+            "stream": True,
+        }
+    )
+
+    async def abandon_at_terminal_chunk() -> None:
+        stream = gateway.chat_stream(request)
+        # role chunk, "part", "ial", then the terminal chunk — the generator
+        # is now suspended AT the terminal yield; close it right there.
+        chunks = [await stream.__anext__() for _ in range(4)]
+        assert chunks[-1].choices[0].finish_reason == "stop"
+        await stream.aclose()
+
+    asyncio.run(abandon_at_terminal_chunk())
+
+    # The completed upstream was settled: the cap-of-1 slot is consumed...
+    with pytest.raises(BudgetExhaustedError):
+        book.check(seat="fable", provider_id="hosted")
+    # ...and the meter recorded the request.
+    assert gateway.usage_snapshot().totals.requests == 1

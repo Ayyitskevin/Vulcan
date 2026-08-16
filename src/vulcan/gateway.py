@@ -465,6 +465,34 @@ class Gateway:
                             completion_tokens=event.usage.completion_tokens,
                             total_tokens=event.usage.prompt_tokens + event.usage.completion_tokens,
                         )
+                    # The upstream HAS completed: its tokens are generated and
+                    # (when reported) known. Commit the meter and the budget
+                    # BEFORE yielding the terminal chunk, so a consumer that
+                    # disconnects at the final yield cannot evade either —
+                    # repeated final-chunk abandonment must never be free.
+                    self._usage.record(
+                        model=request.model,
+                        provider=provider.provider_id,
+                        prompt_tokens=final_usage.prompt_tokens
+                        if final_usage is not None
+                        else None,
+                        completion_tokens=final_usage.completion_tokens
+                        if final_usage is not None
+                        else None,
+                        seat=request.seat,
+                    )
+                    if self._budgets is not None and reservation is not None:
+                        self._budgets.settle(
+                            seat=request.seat,
+                            provider_id=provider.provider_id,
+                            tokens=final_usage.total_tokens if final_usage is not None else None,
+                            reservation_day=reservation,
+                        )
+                    settled = True
+                    logger.info(
+                        "chat_completed",
+                        extra={"metadata": {**metadata, "output_chars": output_chars}},
+                    )
                     yield chunk(ChunkDelta(), finish_reason=event.finish_reason, usage=final_usage)
                     completed = True
                     break
@@ -480,28 +508,6 @@ class Gateway:
                 aclose = getattr(events, "aclose", None)
                 if aclose is not None:
                     await aclose()
-
-            self._usage.record(
-                model=request.model,
-                provider=provider.provider_id,
-                prompt_tokens=final_usage.prompt_tokens if final_usage is not None else None,
-                completion_tokens=final_usage.completion_tokens
-                if final_usage is not None
-                else None,
-                seat=request.seat,
-            )
-            if self._budgets is not None and reservation is not None:
-                self._budgets.settle(
-                    seat=request.seat,
-                    provider_id=provider.provider_id,
-                    tokens=final_usage.total_tokens if final_usage is not None else None,
-                    reservation_day=reservation,
-                )
-            logger.info(
-                "chat_completed",
-                extra={"metadata": {**metadata, "output_chars": output_chars}},
-            )
-            settled = True
         finally:
             # Covers VulcanError, CancelledError, and generator aclose() at
             # ANY yield point: an unsettled reservation is always returned.
