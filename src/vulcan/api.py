@@ -219,11 +219,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        for provider in selected_providers.values():
-            await provider.aclose()
-        if ledger is not None:
-            ledger.close()
+        try:
+            yield
+            for provider in selected_providers.values():
+                await provider.aclose()
+        finally:
+            # A provider aclose() failure must not orphan the ledger handle.
+            if ledger is not None:
+                ledger.close()
 
     app = FastAPI(
         title="Vulcan Local Inference Gateway",

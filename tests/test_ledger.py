@@ -8,6 +8,7 @@ counted and reported, never guessed at.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -298,6 +299,10 @@ def _poisoned_ledger(tmp_path: Path) -> Path:
         b'\xff\xfe{"model": "alias-one"}',
         # wrong JSON type entirely
         json.dumps(["not", "a", "dict"]).encode(),
+        # forged minimal line: valid-looking but missing the token/seat keys
+        json.dumps({"model": "alias-one", "provider": "det", "ts": 1}).encode(),
+        # smuggled extra key: the exact write schema admits no additions
+        json.dumps({**good, "note": POISON_SENTINEL}).encode(),
     ]
     path.write_bytes(
         json.dumps(good, separators=(",", ":"), sort_keys=True).encode()
@@ -319,7 +324,7 @@ def test_poisoned_ledger_lines_never_reach_counters_or_http(tmp_path: Path) -> N
     body = response.json()
     assert body["scope"] == "ledger"
     assert body["ledger"]["replayed_requests"] == 1  # only the good line
-    assert body["ledger"]["skipped_lines"] == 7  # every poison line, counted
+    assert body["ledger"]["skipped_lines"] == 9  # every poison line, counted
     assert body["totals"]["requests"] == 1
     assert body["totals"]["prompt_tokens"] == 7  # the -50 never subtracted
     assert [item["seat"] for item in body["by_seat"]] == ["fable"]
@@ -327,20 +332,55 @@ def test_poisoned_ledger_lines_never_reach_counters_or_http(tmp_path: Path) -> N
     assert POISON_SENTINEL not in response.text
 
 
-def test_ledger_is_closed_on_app_shutdown(tmp_path: Path) -> None:
-    """Lifespan shutdown closes the ledger handle, not just providers."""
+def test_second_gateway_on_the_same_ledger_fails_loud(tmp_path: Path) -> None:
+    """One gateway per ledger file is enforced by flock, not just documented."""
 
     path = tmp_path / "usage.jsonl"
-    client = _client(path)
-    with client:
+    first = UsageLedger(path, clock=lambda: 0.0)
+
+    with pytest.raises(LedgerError):
+        UsageLedger(path, clock=lambda: 0.0)
+
+    first.close()
+    # The lock dies with the handle: a successor opens cleanly.
+    UsageLedger(path, clock=lambda: 0.0).close()
+
+
+def test_ledger_is_closed_on_app_shutdown(tmp_path: Path) -> None:
+    """Lifespan shutdown releases the ledger (proven via the flock)."""
+
+    path = tmp_path / "usage.jsonl"
+    with _client(path) as client:
         assert _chat(client).status_code == 200
 
-    # TestClient exit runs lifespan shutdown; a closed handle means a later
-    # append through the same app would fail — prove the handle is closed by
-    # replaying the file: the write above must be durable and complete.
-    lines = path.read_text().splitlines()
-    assert len(lines) == 1
-    assert json.loads(lines[0])["model"] == "alias-one"
+    # If shutdown had leaked the handle, this open would raise LedgerError.
+    successor = UsageLedger(path, clock=lambda: 0.0)
+    assert successor.stats.replayed_requests == 1
+    successor.close()
+
+
+def test_ledger_closes_even_when_a_provider_aclose_fails(tmp_path: Path) -> None:
+    """A provider shutdown exception must not orphan the ledger handle."""
+
+    from vulcan.providers.deterministic import DeterministicProvider
+
+    class _ExplodingProvider(DeterministicProvider):
+        async def aclose(self) -> None:
+            raise RuntimeError("provider shutdown failure")
+
+    path = tmp_path / "usage.jsonl"
+    config = _config(path)
+    provider = _ExplodingProvider("det", config.providers["det"])
+    app = create_app(config, providers={"det": provider}, clock=lambda: 1_700_000_000.0)
+
+    with contextlib.suppress(RuntimeError):
+        with TestClient(app, base_url="http://127.0.0.1") as client:
+            assert _chat(client).status_code == 200
+
+    # The finally path released the flock despite the provider explosion.
+    successor = UsageLedger(path, clock=lambda: 0.0)
+    assert successor.stats.replayed_requests == 1
+    successor.close()
 
 
 def test_ledger_log_events_survive_the_production_formatter() -> None:
