@@ -373,9 +373,11 @@ def test_ledger_closes_even_when_a_provider_aclose_fails(tmp_path: Path) -> None
     provider = _ExplodingProvider("det", config.providers["det"])
     app = create_app(config, providers={"det": provider}, clock=lambda: 1_700_000_000.0)
 
-    with contextlib.suppress(RuntimeError):
-        with TestClient(app, base_url="http://127.0.0.1") as client:
-            assert _chat(client).status_code == 200
+    with (
+        contextlib.suppress(RuntimeError),
+        TestClient(app, base_url="http://127.0.0.1") as client,
+    ):
+        assert _chat(client).status_code == 200
 
     # The finally path released the flock despite the provider explosion.
     successor = UsageLedger(path, clock=lambda: 0.0)
