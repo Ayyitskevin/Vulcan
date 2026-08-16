@@ -355,6 +355,7 @@ def test_ledger_is_closed_on_app_shutdown(tmp_path: Path) -> None:
 
     # If shutdown had leaked the handle, this open would raise LedgerError.
     successor = UsageLedger(path, clock=lambda: 0.0)
+    UsageRecorder.with_ledger(successor)  # replay is explicit now
     assert successor.stats.replayed_requests == 1
     successor.close()
 
@@ -381,6 +382,7 @@ def test_ledger_closes_even_when_a_provider_aclose_fails(tmp_path: Path) -> None
 
     # The finally path released the flock despite the provider explosion.
     successor = UsageLedger(path, clock=lambda: 0.0)
+    UsageRecorder.with_ledger(successor)
     assert successor.stats.replayed_requests == 1
     successor.close()
 
@@ -403,3 +405,35 @@ def test_ledger_log_events_survive_the_production_formatter() -> None:
     )
     payload = json.loads(SafeJsonFormatter().format(record))
     assert payload["event"] == "usage_ledger_write_failed"
+
+
+def test_oversized_line_is_skipped_in_bounded_chunks(tmp_path: Path) -> None:
+    """A single huge unterminated line never buffers whole and never counts."""
+
+    path = tmp_path / "usage.jsonl"
+    good = (
+        '{"completion_tokens":1,"model":"alias-one","prompt_tokens":1,'
+        '"provider":"det","seat":null,"ts":5}'
+    )
+    # 1 MiB single line with no newline until the end, then a good line.
+    path.write_bytes(b'{"model": "' + b"x" * (1 << 20) + b'"}\n' + good.encode() + b"\n")
+
+    ledger = UsageLedger(path, clock=lambda: 0.0)
+    recorder = UsageRecorder.with_ledger(ledger)
+    ledger.close()
+
+    assert ledger.stats.skipped_lines == 1  # counted once, not per chunk
+    assert ledger.stats.replayed_requests == 1  # the good line after survives
+    assert recorder.snapshot().totals.requests == 1
+
+
+def test_replay_is_once_only(tmp_path: Path) -> None:
+    """A second replay would double-count, so it raises instead."""
+
+    path = tmp_path / "usage.jsonl"
+    ledger = UsageLedger(path, clock=lambda: 0.0)
+    UsageRecorder.with_ledger(ledger)
+
+    with pytest.raises(RuntimeError, match="once-only"):
+        ledger.replay(lambda record: None)
+    ledger.close()

@@ -33,6 +33,9 @@ _MAX_TOKENS = 10**12
 # Exactly the keys append() writes — no more, no fewer. A forged minimal line
 # and a line with smuggled extra keys are both poison.
 _LEDGER_KEYS = frozenset({"completion_tokens", "model", "prompt_tokens", "provider", "seat", "ts"})
+# Real lines are ~200 bytes; anything past this is poison and is skipped in
+# bounded chunks so a single huge unterminated line cannot exhaust memory.
+_MAX_LINE_BYTES = 8192
 
 
 def _valid_ledger_record(record: object) -> bool:
@@ -156,8 +159,8 @@ class UsageLedger:
         self._path = path
         self._clock = clock
         self.stats = LedgerStats()
+        self._replay_done = False
         try:
-            self._replay_existing()
             self._handle: IO[str] = path.open("a", encoding="utf-8")
             try:
                 import fcntl
@@ -171,38 +174,55 @@ class UsageLedger:
             # Fail loud at startup (Prime Directive: never silently fall back).
             raise LedgerError(path, exc.__class__.__name__) from exc
 
-    @property
-    def replayed(self) -> tuple[dict[str, object], ...]:
-        return tuple(self._replayed)
+    def replay(self, sink: Callable[[dict[str, object]], None]) -> None:
+        """Stream valid history into ``sink``, retaining nothing.
 
-    def _replay_existing(self) -> None:
-        self._replayed: list[dict[str, object]] = []
-        if not self._path.exists():
+        Memory is bounded regardless of file size: lines stream one at a time,
+        each valid record goes to the sink and is dropped, and an oversized
+        line (> _MAX_LINE_BYTES) is skipped in bounded chunks without ever
+        being buffered whole. Replay is once-only — a second call would
+        double-count, so it raises.
+        """
+
+        if self._replay_done:
+            raise RuntimeError("ledger replay is once-only")
+        self._replay_done = True
+        if not self._path.exists():  # pragma: no cover - handle open created it
             return
-        # Streamed in binary, decoded per line: one undecodable line is one
-        # skipped line (UnicodeDecodeError is not an OSError), and a large
-        # ledger is never loaded into memory whole.
-        with self._path.open("rb") as handle:
-            for raw_line in handle:
-                if not raw_line.strip():
-                    continue
-                try:
-                    record = json.loads(raw_line.decode("utf-8").strip())
-                except (UnicodeDecodeError, ValueError):
-                    # A torn, foreign, or undecodable line is skipped and
-                    # counted, never guessed at.
-                    self.stats.skipped_lines += 1
-                    continue
-                if not _valid_ledger_record(record):
-                    self.stats.skipped_lines += 1
-                    continue
-                self._replayed.append(record)
-                self.stats.replayed_requests += 1
-                ts = record["ts"]
-                if isinstance(ts, int) and (
-                    self.stats.earliest_ts is None or ts < self.stats.earliest_ts
-                ):
-                    self.stats.earliest_ts = ts
+        try:
+            with self._path.open("rb") as handle:
+                while True:
+                    raw_line = handle.readline(_MAX_LINE_BYTES + 1)
+                    if not raw_line:
+                        break
+                    if len(raw_line) > _MAX_LINE_BYTES:
+                        # Oversized: count once, drain to newline in bounded
+                        # chunks, never hold more than one chunk.
+                        self.stats.skipped_lines += 1
+                        while raw_line and not raw_line.endswith(b"\n"):
+                            raw_line = handle.readline(_MAX_LINE_BYTES + 1)
+                        continue
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        record = json.loads(raw_line.decode("utf-8").strip())
+                    except (UnicodeDecodeError, ValueError):
+                        # A torn, foreign, or undecodable line is skipped and
+                        # counted, never guessed at.
+                        self.stats.skipped_lines += 1
+                        continue
+                    if not _valid_ledger_record(record):
+                        self.stats.skipped_lines += 1
+                        continue
+                    self.stats.replayed_requests += 1
+                    ts = record["ts"]
+                    if isinstance(ts, int) and (
+                        self.stats.earliest_ts is None or ts < self.stats.earliest_ts
+                    ):
+                        self.stats.earliest_ts = ts
+                    sink(record)
+        except OSError as exc:
+            raise LedgerError(self._path, exc.__class__.__name__) from exc
 
     def append(
         self,
@@ -262,10 +282,14 @@ class UsageRecorder:
         """A recorder whose counters start from the ledger and append to it."""
 
         recorder = cls(_ledger=ledger)
-        for record in ledger.replayed:
-            seat = record.get("seat")
-            prompt = record.get("prompt_tokens")
-            completion = record.get("completion_tokens")
+
+        def sink(record: dict[str, object]) -> None:
+            # History streams straight into the counters and is never
+            # retained: startup memory is O(distinct aliases + providers +
+            # seats), not O(ledger size).
+            seat = record["seat"]
+            prompt = record["prompt_tokens"]
+            completion = record["completion_tokens"]
             recorder._count(
                 model=str(record["model"]),
                 provider=str(record["provider"]),
@@ -273,6 +297,8 @@ class UsageRecorder:
                 completion_tokens=completion if isinstance(completion, int) else None,
                 seat=seat if isinstance(seat, str) else None,
             )
+
+        ledger.replay(sink)
         return recorder
 
     def _count(
