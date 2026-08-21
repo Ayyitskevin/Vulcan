@@ -146,6 +146,33 @@ def test_seat_cardinality_is_bounded() -> None:
     book.check(seat="s0", provider_id="hosted")
 
 
+def test_named_seat_fits_at_cardinality_cap() -> None:
+    from vulcan.budgets import _MAX_TRACKED_SEATS
+
+    book = _book(limits={"fable": SeatLimits(None, 10)}, default=SeatLimits(None, 10))
+    for i in range(_MAX_TRACKED_SEATS):
+        book.check(seat=f"s{i}", provider_id="hosted")
+    # A seat with its own configured entry is never squeezed out by a
+    # default-budget label flood; the 403 message ("no budget entry") would
+    # be false for it.
+    assert book.check(seat="fable", provider_id="hosted") is not None
+    with pytest.raises(BudgetUnconfiguredError):
+        book.check(seat="one-too-many", provider_id="hosted")
+
+
+def test_replay_counts_named_seat_at_cardinality_cap() -> None:
+    from vulcan.budgets import _MAX_TRACKED_SEATS
+
+    book = _book(limits={"fable": SeatLimits(None, 10)}, default=SeatLimits(None, 10))
+    for i in range(_MAX_TRACKED_SEATS):
+        book.replay_spend(seat=f"s{i}", provider_id="hosted", tokens=1, ts=float(NOON))
+    # A configured seat's replayed spend is never skipped under a flood of
+    # unconfigured labels — skipping it would under-meter real spend.
+    book.replay_spend(seat="fable", provider_id="hosted", tokens=5, ts=float(NOON))
+    row = next(r for r in book.snapshot() if r.seat == "fable")
+    assert (row.requests_today, row.tokens_today) == (1, 5)
+
+
 def test_window_rolls_at_utc_midnight() -> None:
     now = [float(NOON)]
     book = _book(limits={"fable": SeatLimits(100, None)}, now=now)
