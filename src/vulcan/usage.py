@@ -1,10 +1,13 @@
-"""In-memory, process-lifetime usage counters.
+"""Usage counters, with an opt-in durable ledger.
 
-Deliberately minimal: counts of completed requests and the token counts that
-upstreams actually reported, keyed by public alias, configured provider ID, and (when a request
-carries one) the caller's optional seat label.
-Nothing is persisted, no costs or currencies are computed, and the counters
-reset when the process restarts — Vulcan is not a billing platform.
+Counts of completed requests and the token counts that upstreams actually
+reported, keyed by public alias, configured provider ID, and (when a request
+carries one) the caller's optional seat label. In-memory and process-lifetime
+by default — nothing is persisted and the counters reset on restart — unless
+the operator sets ``[usage] ledger_path``: then every completed request also
+appends one JSONL line (never message content, never provider-native model
+names) and the counters are rebuilt by replaying that file at startup. No
+costs or currencies are computed — Vulcan is not a billing platform.
 
 Token totals are only meaningful alongside ``requests_with_usage``: providers
 that omit token counts contribute a request but no tokens, and Vulcan never
