@@ -368,7 +368,9 @@ operator-chosen caller label (`^[a-z0-9][a-z0-9_-]{0,63}$`, same shape as a
 provider ID) so several local tools sharing one gateway can see who spent
 what. Attribution only: unlabeled requests still count in every other view,
 an unknown label is never rejected against a roster, and the label is never
-forwarded upstream or logged with content. No budgets are enforced.
+forwarded upstream or logged with content. Attribution enforces nothing by
+itself; the opt-in per-seat budgets documented below are a separate, explicit
+gate the operator turns on in configuration.
 
 Deliberate limits, so this stays infrastructure rather than a billing system:
 
