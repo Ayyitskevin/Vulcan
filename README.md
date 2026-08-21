@@ -197,7 +197,7 @@ disabled.
 | `GET` | `/v1/capabilities` | Callable v1 gateway features: chat (buffered and streaming), embeddings and their bounds, supported roles, and configuration-driven discovery. |
 | `POST` | `/v1/chat/completions` | One selected-alias chat request routed to exactly one provider; buffered JSON by default, Server-Sent Events when `stream: true`. |
 | `POST` | `/v1/embeddings` | One selected-alias embedding batch routed to exactly one provider. |
-| `GET` | `/v1/usage` | In-memory, process-lifetime counters for completed requests, per alias and per provider. |
+| `GET` | `/v1/usage` | Completed-request counters per alias, per provider, and per seat label; in-memory by default, durable across restarts with `[usage] ledger_path`; includes per-seat budget state when `[budgets]` is configured. |
 
 Chat request fields:
 
@@ -342,10 +342,10 @@ is a response whose vector count does not match the input count.
 
 ### Usage counters
 
-`GET /v1/usage` reports what this process has served since it started: completed
-request counts and the token counts upstreams actually reported, broken down by
-public alias, by provider, and — for requests that carry the optional `seat`
-label — by caller.
+`GET /v1/usage` reports completed request counts and the token counts
+upstreams actually reported, broken down by public alias, by provider, and —
+for requests that carry the optional `seat` label — by caller. Scope is the
+current process by default, or the durable ledger when enabled (below).
 
 ```json
 {
@@ -468,10 +468,13 @@ request values and provider bodies are never echoed. Provider-side failures carr
 | HTTP | Code | Meaning |
 | --- | --- | --- |
 | 400 | `invalid_host` | The HTTP `Host` header is missing, ambiguous, or not loopback. |
+| 400 | `seat_required` | Budgets are enabled and the hosted request carried no seat label. |
+| 403 | `budget_unconfigured` | The seat has no budget entry (its own or `default`) and budgets are fail-closed. |
 | 404 | `model_not_found` | The public alias is not configured. |
 | 422 | `invalid_request` | JSON or fields do not match the v1 contract. |
 | 422 | `unsupported_capability` | Streaming, a model without `chat`, or a provider-specific constraint (see above). |
 | 429 | `provider_rate_limited` | The upstream provider rate limited the request. |
+| 429 | `budget_exhausted` | The seat's daily hosted budget is spent; retryable after `details.window_resets_at`. |
 | 502 | `provider_auth_failed` | The upstream provider rejected the configured credential. |
 | 502 | `provider_error` | The provider returned another non-success status. |
 | 502 | `provider_protocol_error` | The provider returned malformed or incomplete data. |
