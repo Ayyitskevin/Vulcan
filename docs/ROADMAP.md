@@ -12,8 +12,8 @@ Read order before any work: `README.md` → `docs/ARCHITECTURE.md` → this file
 
 ## 1. How to work this plan (agent operating instructions)
 
-0. **Next phase: Phase 4 (maintenance backlog, as needed).** Phases 1-3 are
-   complete and merged.
+0. **Next phase: operator-directed work or the §8 standing item.** Phases
+   1–4 and the Road-to-1.0 gates (§9) are complete and merged.
 1. **One phase per pull request.** Complete phases strictly in order. Do not
    start phase N+1 in the same PR as phase N. Small preparatory refactors
    belong in the phase PR that needs them.
@@ -85,7 +85,7 @@ predictability, safety, and honesty, not feature breadth.
 | Safe JSON logging + redaction | `src/vulcan/observability.py` |
 | CLI `serve` + `check` (credential presence without values) | `src/vulcan/cli.py` |
 | Real-process smoke test (all five endpoints) | `scripts/smoke.py` |
-| 364 tests, all upstream traffic mocked | `tests/` |
+| 592 tests, all upstream traffic mocked | `tests/` |
 
 ---
 
@@ -291,7 +291,51 @@ Do these only when a session has no higher phase pending, one PR per item:
   the matrix.
 - Keep the suite fast (< ~10s); parallelize only if it grows past that.
 
-## 9. Out of scope until the operator explicitly asks
+---
+
+## 9. Road-to-1.0 gates (operator-directed, 2026-08-16) — ✅ DONE
+
+After Phase 4, the operator directed a "Road-to-1.0" push focused on usage
+visibility and spend control for the multi-seat mickey deployment. All of it
+shipped on 2026-08-16 across six PRs; gates 4 and 5 are labeled as such in
+their PRs, while gates 1–3 were named only in the fleet log discussion
+(`shared/logs/mickey-actions.log`, 2026-08-16) and are not labeled in the
+repo record. What landed, in order:
+
+- **Seat usage attribution** (PR #14). Optional `seat` caller label on chat
+  and embedding requests and a `by_seat` view in `/v1/usage`, so several
+  local tools sharing one gateway can see who spent what. Attribution before
+  enforcement: no budgets, no auth semantics; the label never leaves the
+  process (pinned by `tests/test_seat.py` sentinels).
+- **Operator read subcommands** (PR #15). `vulcan usage` / `vulcan models`
+  GET the running gateway's JSON verbatim — curl+jq replacement for the two
+  questions an operator actually asks on a headless box.
+- **Gate 4 — durable usage ledger** (PRs #16, #17). Opt-in
+  `[usage] ledger_path`: append-only JSONL, one line per completed request
+  (never content), replayed into counters at boot so `/v1/usage` survives
+  restarts. Asymmetric failure policy: an unopenable ledger kills startup
+  loudly; a failed append is counted and logged but never fails a completed
+  request. PR #17 hardened the trust boundary post-merge — replay enforces
+  the write-side contract per line, violations become `skipped_lines`, and a
+  poisoned ledger cannot reach HTTP responses (seven-class sentinel).
+- **Gate 5 — per-seat daily budgets, hosted only** (PRs #18, #19). When
+  `[budgets.seats.*]` exists, hosted requests are gated pre-flight: seat
+  required, fail-closed resolution (own entry or `default`), UTC-day
+  headroom. Refusals are typed (`seat_required` / `budget_unconfigured` /
+  `budget_exhausted` + reset time) and never rerouted — the caller owns any
+  fallback. PR #19 made the reservation lifecycle cancellation-safe
+  (finally-guaranteed release on error, disconnect, or abandoned stream) and
+  closed the replay-side cardinality cap.
+
+Process lesson, recorded so the next ladder goes smoother: PRs #16 and #18
+were each merged at their round-1 review heads, and later review rounds had
+to land as separate fix-forward PRs (#17, #19). **Land all review rounds on
+the branch before merging** — a fix-forward PR is the tax for merging early.
+
+The mickey deployment these gates serve is documented in `deploy/` (systemd
+unit + layout convention).
+
+## 10. Out of scope until the operator explicitly asks
 
 Chat UI, agents/tool-calling, images/multimodal, model
 download/pull/management, auto-routing or "best model" selection, retries and
