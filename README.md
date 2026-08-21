@@ -64,6 +64,14 @@ The example binds `127.0.0.1:8140`. Vulcan rejects non-loopback server hosts,
 URL credentials, redirects, and environment proxy inheritance. `localhost`, IPv4
 loopback, and IPv6 loopback are allowed.
 
+## Running as a service
+
+For a supervised, boot-persistent install (recommended once Vulcan is part of
+your daily tooling), `deploy/` ships a reference systemd unit and the deploy
+convention it assumes — code checkout and state directory kept separate,
+restart-on-failure, structured logs to the journal. See
+[`deploy/README.md`](deploy/README.md).
+
 ## Configuration
 
 Configuration is strict TOML; unknown fields fail startup. `schema_version = 2` is
