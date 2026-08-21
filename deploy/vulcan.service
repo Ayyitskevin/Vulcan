@@ -1,0 +1,45 @@
+# Vulcan — local-first AI gateway (loopback :8140)
+#
+# Reference unit for a single-user deploy on the operator's own machine.
+# Paths below match the layout documented in deploy/README.md:
+#   code:  /home/kevin-lee/deploy/vulcan        (git clone, main)
+#   state: /home/kevin-lee/deploy/vulcan-data   (vulcan.toml, usage ledger)
+# Adjust User/Group and paths if your layout differs.
+#
+# Vulcan makes HTTP-only calls to its providers (Ollama loopback, hosted
+# HTTPS), so the filesystem is locked to read-only except the state dir.
+
+[Unit]
+Description=Vulcan — local-first AI gateway (loopback :8140)
+Documentation=https://github.com/Ayyitskevin/Vulcan
+After=network-online.target ollama.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=kevin-lee
+Group=kevin-lee
+ExecStart=/home/kevin-lee/deploy/vulcan/.venv/bin/vulcan serve --config /home/kevin-lee/deploy/vulcan-data/vulcan.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vulcan
+
+# Hosted BYOK keys, when the operator enables them, live in an untracked
+# root-readable-only env file next to the config — never in the unit, never
+# in the TOML. Uncomment once that file exists:
+#EnvironmentFile=-/home/kevin-lee/deploy/vulcan-data/.env
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/kevin-lee/deploy/vulcan-data
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
