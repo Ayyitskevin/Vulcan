@@ -109,10 +109,15 @@ class BudgetBook:
         if limits is None:
             raise BudgetUnconfiguredError(seat)
         self._roll()
-        if seat not in self._requests and len(self._requests) >= _MAX_TRACKED_SEATS:
+        if (
+            seat not in self._limits
+            and seat not in self._requests
+            and len(self._requests) >= _MAX_TRACKED_SEATS
+        ):
             # Cardinality guard: an unbounded stream of fresh labels under a
-            # default budget must not grow state without limit. The message
-            # tells the operator the fix (a named entry always fits).
+            # default budget must not grow state without limit. Seats with
+            # their own configured entry are exempt — they are bounded by the
+            # config itself, and a label flood must never squeeze them out.
             raise BudgetUnconfiguredError(seat)
         resets_at = self._resets_at()
         if (
@@ -188,11 +193,17 @@ class BudgetBook:
         self._roll()
         if int(ts) // _DAY_SECONDS != self._day:
             return
-        if seat not in self._requests and len(self._requests) >= _MAX_TRACKED_SEATS:
+        if (
+            seat not in self._limits
+            and seat not in self._requests
+            and len(self._requests) >= _MAX_TRACKED_SEATS
+        ):
             # Same cardinality guard as check(): a ledger crafted (or written
             # before this guard existed) with unbounded distinct labels must
-            # not repopulate unbounded state at boot. Skipping under-meters
-            # those seats, which is the safe direction for a refusal gate.
+            # not repopulate unbounded state at boot. Configured seats are
+            # exempt (bounded by the config, and skipping them would
+            # under-meter real spend); skipping unconfigured labels is the
+            # safe direction for a refusal gate.
             return
         self._tokens[seat] = self._tokens.get(seat, 0) + (tokens or 0)
         self._requests[seat] = self._requests.get(seat, 0) + 1
