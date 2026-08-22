@@ -76,6 +76,10 @@ timeout_seconds = 60.0
 # Models: every public alias routes to exactly one provider and one
 # provider-native model name. No fallback, ever. The alias (`id`) is the only
 # name clients see; `provider_model` never leaves the process.
+# `class` is an optional free-form short routing label (e.g. "code",
+# "code-fast", "simple", "utility", "vision-work", "embed", "hosted-chat")
+# surfaced in /v1/models so agents can read the operator's class → alias
+# mapping from the gateway itself. Vulcan never routes on it.
 # ---------------------------------------------------------------------------
 
 [[models]]
@@ -84,6 +88,7 @@ provider = "local-ollama"
 provider_model = "replace-with-an-installed-ollama-model"
 capabilities = ["chat"]
 description = "A locally configured chat model"
+class = "code"
 
 [[models]]
 id = "openai-chat"
@@ -91,6 +96,7 @@ provider = "openai"
 provider_model = "example-openai-model"
 capabilities = ["chat"]
 description = "OpenAI chat model (BYOK)"
+class = "hosted-chat"
 
 [[models]]
 id = "anthropic-chat"
@@ -98,6 +104,7 @@ provider = "anthropic"
 provider_model = "example-anthropic-model"
 capabilities = ["chat"]
 description = "Anthropic chat model (BYOK)"
+class = "hosted-chat"
 
 [[models]]
 id = "kimi-chat"
@@ -105,6 +112,7 @@ provider = "moonshot"
 provider_model = "example-kimi-model"
 capabilities = ["chat"]
 description = "Moonshot/Kimi chat model (BYOK)"
+class = "hosted-chat"
 
 [[models]]
 id = "glm-chat"
@@ -112,6 +120,7 @@ provider = "zai"
 provider_model = "example-glm-model"
 capabilities = ["chat"]
 description = "Z.AI/GLM chat model (BYOK)"
+class = "hosted-chat"
 
 [[models]]
 id = "grok-chat"
@@ -119,3 +128,4 @@ provider = "xai"
 provider_model = "example-grok-model"
 capabilities = ["chat"]
 description = "xAI/Grok chat model (BYOK)"
+class = "hosted-chat"

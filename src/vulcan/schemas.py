@@ -136,6 +136,10 @@ class DiscoveryMetadata(StrictSchema):
 
 
 class ModelRecord(StrictSchema):
+    # populate_by_name lets constructors use the keyword-safe attribute name
+    # while the API contract keeps the public key `class`.
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
     id: str
     object: Literal["model"] = "model"
     provider: str = Field(pattern=PROVIDER_ID_PATTERN)
@@ -143,6 +147,7 @@ class ModelRecord(StrictSchema):
     capabilities: tuple[Capability, ...]
     availability: Availability = "unchecked"
     description: str | None = None
+    class_: str | None = Field(default=None, alias="class")
 
 
 class ModelListResponse(StrictSchema):

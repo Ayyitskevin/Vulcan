@@ -413,6 +413,7 @@ def create_app(
             capabilities=tuple(sorted(model.capabilities, key=str)),
             availability=availability,
             description=model.description,
+            class_=model.class_,
         )
 
     @app.get("/v1/models", response_model=ModelListResponse, responses=ERROR_RESPONSES)

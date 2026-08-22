@@ -16,6 +16,7 @@ class ConfiguredModel:
     provider_model: str
     capabilities: frozenset[Capability]
     description: str | None
+    class_: str | None
 
 
 class ModelRegistry:
@@ -27,6 +28,7 @@ class ModelRegistry:
                 provider_model=model.provider_model,
                 capabilities=model.capabilities,
                 description=model.description,
+                class_=model.class_,
             )
             for model in models
         )

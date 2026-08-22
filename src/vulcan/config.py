@@ -190,11 +190,19 @@ HOSTED_PROVIDER_TYPES = frozenset({"anthropic", "openai_compatible"})
 
 
 class ModelConfig(StrictConfigModel):
+    # populate_by_name lets Python code use the keyword-safe attribute name
+    # while TOML keeps the public key `class`.
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
     id: str = Field(pattern=PUBLIC_MODEL_PATTERN)
     provider: str = Field(pattern=PROVIDER_ID_PATTERN)
     provider_model: str = Field(min_length=1, max_length=256)
     capabilities: frozenset[Capability] = Field(min_length=1)
     description: str | None = Field(default=None, max_length=240)
+    # Optional free-form routing label (e.g. "code", "code-fast", "simple",
+    # "hosted-chat"), surfaced in /v1/models so agents can read the operator's
+    # class → alias mapping from the gateway. Never used for routing.
+    class_: str | None = Field(default=None, alias="class", max_length=64)
 
     @field_validator("provider_model")
     @classmethod

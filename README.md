@@ -113,6 +113,7 @@ provider = "local-ollama"      # exact provider ID; no fallback
 provider_model = "an-installed-model"  # provider-native name, never exposed
 capabilities = ["chat"]
 description = "Optional description"
+class = "code"  # optional short routing label, surfaced in /v1/models
 ```
 
 Provider IDs are operator-chosen, match `[a-z0-9][a-z0-9_-]*`, and appear in API
@@ -155,6 +156,12 @@ A new OpenAI-compatible vendor needs no application code: add another
   1. This is the only place Vulcan calls an authenticated endpoint outside serving
   a client request, and it happens solely because an operator asked for it —
   `/healthz`, `/v1/models`, and readiness never do.
+- `check` reads the environment of the shell you run it in. Under the shipped
+  systemd unit, hosted keys live only in the unit's `EnvironmentFile` (e.g.
+  `/etc/systemd/system/vulcan.service` → `~/deploy/vulcan-data/.env`), so a
+  plain-shell `check --verify-credentials` reports hosted credentials `missing`
+  even on a healthy deployment. To probe the running service instead, use
+  `GET /healthz` — it answers from inside the unit's environment.
 - `uv run vulcan usage --config vulcan.toml` and
   `uv run vulcan models --config vulcan.toml` read `/v1/usage` and `/v1/models`
   from the **running** gateway named by the config and print its JSON verbatim
@@ -192,7 +199,7 @@ disabled.
 | Method | Path | Contract |
 | --- | --- | --- |
 | `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, one entry per configured provider (`id`, `type`, honest `availability`), and model count. Optional `?refresh=true` forces a new probe. |
-| `GET` | `/v1/models` | Configured public aliases only: description, declared capabilities, selected provider ID/type, and readiness annotation. Optional `?refresh=true`. |
+| `GET` | `/v1/models` | Configured public aliases only: description, optional `class` routing label, declared capabilities, selected provider ID/type, and readiness annotation. Optional `?refresh=true`. |
 | `GET` | `/v1/models/{id}` | One configured public model with the same annotation; `model_not_found` if the alias is not configured. Optional `?refresh=true`. |
 | `GET` | `/v1/capabilities` | Callable v1 gateway features: chat (buffered and streaming), embeddings and their bounds, supported roles, and configuration-driven discovery. |
 | `POST` | `/v1/chat/completions` | One selected-alias chat request routed to exactly one provider; buffered JSON by default, Server-Sent Events when `stream: true`. |

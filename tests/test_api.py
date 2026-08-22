@@ -108,6 +108,7 @@ def _config(*, response_text: str = REPLY_SENTINEL) -> GatewayConfig:
                 provider_model=RUNTIME_SENTINEL,
                 capabilities=frozenset({Capability.CHAT}),
                 description="Configured chat model",
+                class_="code",
             ),
             ModelConfig(
                 id="public-embed",
@@ -206,6 +207,7 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
                 "capabilities": ["chat"],
                 "availability": "available",
                 "description": "Configured chat model",
+                "class": "code",
             },
             {
                 "id": "public-embed",
@@ -215,6 +217,7 @@ def test_models_are_exactly_configuration_driven_and_never_claim_loaded_state() 
                 "capabilities": ["embeddings"],
                 "availability": "available",
                 "description": None,
+                "class": None,
             },
         ],
     }
@@ -360,6 +363,7 @@ def test_get_model_returns_configured_model_with_readiness() -> None:
     assert body["provider_type"] == "deterministic"
     assert body["capabilities"] == ["chat"]
     assert body["availability"] == "available"
+    assert body["class"] == "code"
     assert RUNTIME_SENTINEL not in response.text
     _assert_request_id(response)
 

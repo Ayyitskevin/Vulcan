@@ -397,6 +397,10 @@ def test_load_config_parses_the_shipped_multi_provider_example() -> None:
         api_key_env = getattr(provider, "api_key_env", None)
         if api_key_env is not None:
             assert api_key_env.startswith("VULCAN_")
+    # The example demonstrates the optional class → alias routing labels.
+    classes = {model.id: model.class_ for model in config.models}
+    assert classes["local-chat"] == "code"
+    assert classes["kimi-chat"] == "hosted-chat"
 
 
 def test_load_config_parses_the_shipped_deterministic_example() -> None:
@@ -672,6 +676,36 @@ def test_gateway_config_rejects_unknown_capability(
         GatewayConfig.model_validate(valid_config_document)
 
     assert "enum" in _error_types(raised.value)
+
+
+# ── Optional per-alias class label ────────────────────────────────────────────
+
+
+def test_model_class_label_defaults_to_none_when_omitted(
+    valid_config_document: dict[str, Any],
+) -> None:
+    config = GatewayConfig.model_validate(valid_config_document)
+
+    assert config.models[0].class_ is None
+
+
+def test_model_class_label_accepts_a_free_form_short_string(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["models"][0]["class"] = "code-fast"
+
+    config = GatewayConfig.model_validate(valid_config_document)
+
+    assert config.models[0].class_ == "code-fast"
+
+
+def test_model_class_label_is_bounded(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["models"][0]["class"] = "x" * 65
+
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(valid_config_document)
 
 
 def test_gateway_config_is_deeply_immutable(gateway_config: GatewayConfig) -> None:
