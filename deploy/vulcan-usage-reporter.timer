@@ -1,0 +1,16 @@
+# Daily trigger for the Vulcan usage reporter.
+#
+# 06:17 local, deliberately off the hour: daily timers herded onto :00:00
+# make the 06:00 minute needlessly busy. Persistent=true fires once at boot
+# if a scheduled run was missed while the machine was off — the snapshot diff
+# simply stretches the window and the digest line says so (e.g. [delta 48h]).
+
+[Unit]
+Description=Daily Vulcan usage digest to Athena
+
+[Timer]
+OnCalendar=*-*-* 06:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

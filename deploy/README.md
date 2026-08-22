@@ -66,6 +66,64 @@ failed append never fails a completed request, but a lost ledger file means
 lost history — include `vulcan-data` in whatever backup covers the machine.
 One gateway process per ledger file.
 
+## Usage reporter (daily digest to Athena)
+
+`vulcan-usage-reporter.service` + `.timer` run `scripts/usage_reporter.py`
+once a day (06:17 local, off the hour on purpose): read `/v1/usage`, diff
+against the previous snapshot in `vulcan-data/usage-reporter-state.json`, and
+post a compact digest — request/token counts per seat and per alias, budget
+headroom, ledger honesty counters — into Athena's forge ingest. Content-safe
+by construction: counters and labels only, which is all `/v1/usage` has.
+
+Athena's forge speaks one dialect (`github`) and lands a delivery only where
+it names a real issue key, so the digest arrives as imported history
+(`forge_commit` rows, summary ≤ 200 chars each) on one standing issue.
+`/v1/usage` is cumulative, so daily numbers are a snapshot diff: the first
+run posts `[baseline]`, a counter regression or scope change posts `[reset]`
+with cumulative values, and a missed day just stretches the next window
+(`[delta 48h]`). One attempt per tick, no retries; any failure (Vulcan or
+Athena unreachable, signature refused, delivery landed nowhere) exits
+non-zero with one journald line. The reporter can never affect the `vulcan`
+service — it shares nothing but the state directory.
+
+One-time setup (operator):
+
+```bash
+# 1. Register the forge source (admin-scoped token required). The secret is
+#    shown ONCE; losing it means re-registering.
+curl -fsS -X POST http://100.125.80.91:8300/event-sources \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "vulcan", "kind": "github"}'
+# → 201 {..., "secret": "evtsec_…"}
+
+# 2. Create the standing issue the digest lands on (any project), e.g.
+#    "Vulcan daily usage digest" → VUL-1.
+
+# 3. Configure the reporter (0600, untracked — the secret lives here only).
+cp deploy/usage-reporter.env.example ~/deploy/vulcan-data/usage-reporter.env
+chmod 600 ~/deploy/vulcan-data/usage-reporter.env
+# Edit: ATHENA_FORGE_SOURCE=vulcan, ATHENA_FORGE_SECRET=evtsec_…, ATHENA_ISSUE_KEY=VUL-1
+
+# 4. Install the units and enable the timer (not the service).
+sudo cp deploy/vulcan-usage-reporter.service deploy/vulcan-usage-reporter.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vulcan-usage-reporter.timer
+
+# 5. Prove it end to end: the first manual run posts the baseline.
+systemctl start vulcan-usage-reporter.service
+journalctl -u vulcan-usage-reporter -n 5 --no-pager   # expect "baseline digest posted — N rows"
+systemctl list-timers vulcan-usage-reporter.timer --no-pager
+```
+
+The service stays disabled; the timer owns the schedule. A manual
+`systemctl start` any time posts a digest on demand.
+
+Known quirk: Athena extracts issue-key candidates from message text, so a
+seat or alias name ending in `-<digits>` (say `llama-3`) is a candidate key.
+It lands only if a matching project/issue actually exists — avoid such names
+if a colliding project key is ever created.
+
 ## Hosted BYOK keys
 
 When hosted providers are enabled, their keys go in

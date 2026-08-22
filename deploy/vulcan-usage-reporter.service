@@ -1,0 +1,43 @@
+# Vulcan usage reporter — daily usage digest into Athena's forge ingest.
+#
+# Reference oneshot unit, pairs with vulcan-usage-reporter.timer. Paths match
+# the layout documented in deploy/README.md:
+#   code:  /home/kevin-lee/deploy/vulcan        (git clone, main)
+#   state: /home/kevin-lee/deploy/vulcan-data   (vulcan.toml, usage ledger,
+#                                                usage-reporter.env, snapshot)
+#
+# One attempt per timer tick, no Restart: a failed run exits non-zero, logs
+# one journald line, and the next run's delta covers the missed window. The
+# reporter must never affect the vulcan service — it shares nothing with it
+# but the state directory, and After= here is ordering only, not a dependency.
+
+[Unit]
+Description=Vulcan usage reporter — daily digest to Athena forge
+Documentation=https://github.com/Ayyitskevin/Vulcan
+After=network-online.target vulcan.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kevin-lee
+Group=kevin-lee
+# Any Python 3.12+ interpreter works; the script is stdlib-only. The venv
+# interpreter is used because the documented layout already guarantees it.
+ExecStart=/home/kevin-lee/deploy/vulcan/.venv/bin/python /home/kevin-lee/deploy/vulcan/scripts/usage_reporter.py
+TimeoutStartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vulcan-usage-reporter
+
+# Athena source name, one-time secret, and target issue key live in an
+# untracked 0600 env file next to the state — never in the unit, never in
+# the repo. See deploy/usage-reporter.env.example.
+EnvironmentFile=-/home/kevin-lee/deploy/vulcan-data/usage-reporter.env
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/kevin-lee/deploy/vulcan-data
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
