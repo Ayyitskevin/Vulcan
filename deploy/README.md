@@ -84,8 +84,10 @@ than assumed (a watchdog that has never fired is a claim, not a mechanism):
 ```bash
 kill -STOP "$(systemctl show vulcan -p MainPID --value)"  # simulate a wedge
 journalctl -u vulcan -f          # expect "Watchdog timeout" then a restart
-# SIGABRT queues against a stopped process, so systemd escalates to SIGKILL
-# after TimeoutStopSec — allow up to ~2 minutes end to end.
+# systemd pairs the kill signal with SIGCONT, so even a stopped process
+# dies promptly — expect recovery in about WatchdogSec + RestartSec
+# (35s observed on the 2026-08-23 drill: timeout → SIGABRT → restart,
+# ledger replayed 34/34 with zero skips).
 curl -fsS http://127.0.0.1:8140/healthz   # recovered
 curl -s http://127.0.0.1:8140/v1/usage | python3 -c \
   'import json,sys; print(json.load(sys.stdin)["ledger"])'  # replay happened
