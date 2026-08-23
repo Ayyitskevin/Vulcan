@@ -23,6 +23,7 @@ class ProviderChatRequest:
     messages: tuple[ProviderMessage, ...]
     temperature: float | None
     max_tokens: int | None
+    keep_alive: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,7 @@ ProviderStreamEvent = StreamDelta | StreamEnd
 class ProviderEmbeddingRequest:
     provider_model: str
     inputs: tuple[str, ...]
+    keep_alive: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -345,6 +345,7 @@ class Gateway:
             ),
             temperature=request.temperature,
             max_tokens=request.max_tokens,
+            keep_alive=model.keep_alive,
         )
 
     def _handle_failure(
@@ -559,6 +560,7 @@ class Gateway:
                     ProviderEmbeddingRequest(
                         provider_model=model.provider_model,
                         inputs=inputs,
+                        keep_alive=model.keep_alive,
                     )
                 )
                 if len(result.vectors) != len(inputs):

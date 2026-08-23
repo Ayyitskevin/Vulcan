@@ -6,7 +6,9 @@ shipped config → factory → gateway → adapter path.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -15,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from vulcan.api import create_app
 from vulcan.config import GatewayConfig
+from vulcan.observability import SafeJsonFormatter
 from vulcan.providers.anthropic import AnthropicProvider
 from vulcan.providers.base import Provider
 from vulcan.providers.deterministic import DeterministicProvider
@@ -376,3 +379,63 @@ def test_hosted_provider_failure_logs_and_errors_stay_content_safe(
     ):
         assert sentinel not in response.text
         assert sentinel not in caplog.text
+
+
+async def _unused_handler(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"unexpected call to an unrelated provider: {request.url.path}")
+
+
+def test_keep_alive_flows_config_to_ollama_payload_and_never_to_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """End to end: alias keep_alive reaches the Ollama payload, and the
+    residency value never appears in the content-safe log stream."""
+
+    document = _document()
+    document["models"][0]["keep_alive"] = "2h"  # local-chat, the Ollama alias
+    config = GatewayConfig.model_validate(document)
+
+    captured: list[httpx.Request] = []
+
+    async def ollama_handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "runtime-chat"}]})
+        return httpx.Response(
+            200,
+            json={"message": {"role": "assistant", "content": "from ollama"}, "done": True},
+        )
+
+    stream = io.StringIO()
+    log_handler = logging.StreamHandler(stream)
+    log_handler.setFormatter(SafeJsonFormatter())
+    vulcan_logger = logging.getLogger("vulcan")
+    monkeypatch.setattr(vulcan_logger, "handlers", [log_handler])
+    monkeypatch.setattr(vulcan_logger, "propagate", False)
+    caplog.set_level(logging.INFO, logger="vulcan")
+    for child_name in ("vulcan.api", "vulcan.gateway"):
+        child = logging.getLogger(child_name)
+        monkeypatch.setattr(child, "handlers", [])
+        monkeypatch.setattr(child, "level", logging.NOTSET)
+        monkeypatch.setattr(child, "propagate", True)
+
+    providers = _mocked_providers(
+        config,
+        {
+            "local-ollama": ollama_handler,
+            "openai": _unused_handler,
+            "anthropic": _unused_handler,
+        },
+    )
+    with TestClient(create_app(config, providers=providers), base_url="http://127.0.0.1") as client:
+        reply = _chat(client, "local-chat")
+
+    assert reply.status_code == 200
+    chat_calls = [request for request in captured if request.url.path == "/api/chat"]
+    assert len(chat_calls) == 1
+    assert json.loads(chat_calls[0].content)["keep_alive"] == "2h"
+    rendered = stream.getvalue()
+    assert "chat_completed" in rendered  # logging flowed; the denials are real
+    assert "keep_alive" not in rendered
+    assert "2h" not in rendered

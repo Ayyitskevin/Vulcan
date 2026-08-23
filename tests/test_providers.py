@@ -40,6 +40,7 @@ def _chat_request(
     provider_model: str = "runtime-model",
     temperature: float | None = None,
     max_tokens: int | None = None,
+    keep_alive: str | None = None,
 ) -> ProviderChatRequest:
     return ProviderChatRequest(
         provider_model=provider_model,
@@ -49,6 +50,7 @@ def _chat_request(
         ),
         temperature=temperature,
         max_tokens=max_tokens,
+        keep_alive=keep_alive,
     )
 
 
@@ -187,6 +189,29 @@ def test_ollama_posts_exact_native_chat_request_and_parses_success() -> None:
         finish_reason="length",
         usage=ProviderTokenUsage(prompt_tokens=12, completion_tokens=4),
     )
+
+
+def test_ollama_chat_payload_carries_keep_alive_only_when_set() -> None:
+    # The exact-payload test above pins the unset case byte-for-byte; this one
+    # pins presence when configured and absence (not null) when not.
+    captured: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "model": "runtime-model",
+                "message": {"role": "assistant", "content": "Hello."},
+                "done": True,
+            },
+        )
+
+    asyncio.run(_invoke_ollama(handler, request=_chat_request(keep_alive="2h")))
+    asyncio.run(_invoke_ollama(handler, request=_chat_request()))
+
+    assert json.loads(captured[0].content)["keep_alive"] == "2h"
+    assert "keep_alive" not in json.loads(captured[1].content)
 
 
 @pytest.mark.parametrize(

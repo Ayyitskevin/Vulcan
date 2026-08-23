@@ -89,6 +89,11 @@ provider_model = "replace-with-an-installed-ollama-model"
 capabilities = ["chat"]
 description = "A locally configured chat model"
 class = "code"
+# Optional Ollama-only residency knob, passed through inside the request the
+# gateway already makes: "-1" pins the model resident, "0" unloads after each
+# request, a Go duration ("30m", "2h30m") sets an idle TTL. Omit it to inherit
+# the Ollama server's own keep-alive policy.
+# keep_alive = "2h"
 
 [[models]]
 id = "openai-chat"

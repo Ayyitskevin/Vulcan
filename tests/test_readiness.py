@@ -52,6 +52,7 @@ def _configured(
             capabilities=frozenset({Capability.CHAT}),
             description=None,
             class_=None,
+            keep_alive=None,
         )
         for public_id, provider_model in pairs
     )
@@ -166,6 +167,7 @@ def test_reconcile_annotates_each_model_from_its_own_provider_only() -> None:
             capabilities=frozenset({Capability.CHAT}),
             description=None,
             class_=None,
+            keep_alive=None,
         ),
         ConfiguredModel(
             id="cloud-chat",
@@ -174,6 +176,7 @@ def test_reconcile_annotates_each_model_from_its_own_provider_only() -> None:
             capabilities=frozenset({Capability.CHAT}),
             description=None,
             class_=None,
+            keep_alive=None,
         ),
         ConfiguredModel(
             id="canned-chat",
@@ -182,6 +185,7 @@ def test_reconcile_annotates_each_model_from_its_own_provider_only() -> None:
             capabilities=frozenset({Capability.CHAT}),
             description=None,
             class_=None,
+            keep_alive=None,
         ),
     )
     report = reconcile_configured_models(

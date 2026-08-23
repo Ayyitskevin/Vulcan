@@ -17,6 +17,7 @@ class ConfiguredModel:
     capabilities: frozenset[Capability]
     description: str | None
     class_: str | None
+    keep_alive: str | None
 
 
 class ModelRegistry:
@@ -29,6 +30,7 @@ class ModelRegistry:
                 capabilities=model.capabilities,
                 description=model.description,
                 class_=model.class_,
+                keep_alive=model.keep_alive,
             )
             for model in models
         )

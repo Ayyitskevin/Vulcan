@@ -714,3 +714,64 @@ def test_gateway_config_is_deeply_immutable(gateway_config: GatewayConfig) -> No
 
     assert isinstance(gateway_config.models, tuple)
     assert isinstance(gateway_config.models[0].capabilities, frozenset)
+
+
+# ── Optional per-alias keep_alive (Ollama residency) ─────────────────────────
+
+
+def _ollama_document(*, keep_alive: str | None = None) -> dict[str, Any]:
+    model: dict[str, Any] = {
+        "id": "local-chat",
+        "provider": "local-ollama",
+        "provider_model": "runtime-chat",
+        "capabilities": ["chat"],
+    }
+    if keep_alive is not None:
+        model["keep_alive"] = keep_alive
+    return {
+        "schema_version": 2,
+        "providers": {
+            "local-ollama": {
+                "type": "ollama",
+                "base_url": "http://127.0.0.1:11434",
+                "timeout_seconds": 1.0,
+            }
+        },
+        "models": [model],
+    }
+
+
+def test_model_keep_alive_defaults_to_none_when_omitted(
+    valid_config_document: dict[str, Any],
+) -> None:
+    config = GatewayConfig.model_validate(valid_config_document)
+
+    assert config.models[0].keep_alive is None
+
+
+@pytest.mark.parametrize("value", ["-1", "0", "5m", "2h30m", "500ms", "1h15m30s", "10s"])
+def test_model_keep_alive_accepts_pin_unload_and_go_durations(value: str) -> None:
+    config = GatewayConfig.model_validate(_ollama_document(keep_alive=value))
+
+    assert config.models[0].keep_alive == value
+
+
+@pytest.mark.parametrize("value", ["forever", "5", "m", "-5m", "5 m", "1.5h", ""])
+def test_model_keep_alive_rejects_non_duration_strings(value: str) -> None:
+    # Deliberately a safe subset of Go's duration grammar: whole-number
+    # segments only, no fractions, no signs beyond the bare "-1" pin.
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(_ollama_document(keep_alive=value))
+
+
+def test_model_keep_alive_is_rejected_on_non_ollama_providers(
+    valid_config_document: dict[str, Any],
+) -> None:
+    # The fixture's model rides a deterministic provider.
+    valid_config_document["models"][0]["keep_alive"] = "5m"
+
+    with pytest.raises(ValidationError) as raised:
+        GatewayConfig.model_validate(valid_config_document)
+
+    error_types = {item["type"] for item in raised.value.errors(include_url=False)}
+    assert "keep_alive_ollama_only" in error_types

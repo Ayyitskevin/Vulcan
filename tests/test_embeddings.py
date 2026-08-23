@@ -59,10 +59,11 @@ def _credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(OPENAI_KEY_ENV, OPENAI_KEY_SENTINEL)
 
 
-def _embed_request(*inputs: str) -> ProviderEmbeddingRequest:
+def _embed_request(*inputs: str, keep_alive: str | None = None) -> ProviderEmbeddingRequest:
     return ProviderEmbeddingRequest(
         provider_model="native-embed",
         inputs=inputs or (INPUT_SENTINEL,),
+        keep_alive=keep_alive,
     )
 
 
@@ -299,6 +300,24 @@ def test_ollama_embed_posts_api_embed_and_parses_vectors() -> None:
     assert result.vectors == ((0.5, 0.25), (0.75, 1.0))
     # Embeddings have no completion tokens, so total mirrors prompt.
     assert result.usage == ProviderEmbeddingUsage(prompt_tokens=6, total_tokens=6)
+
+
+def test_ollama_embed_payload_carries_keep_alive_when_set() -> None:
+    # The exact-payload assertion above pins the unset case; this pins
+    # presence when the alias configures a residency knob.
+    captured: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"embeddings": [[0.5]], "prompt_eval_count": 1})
+
+    _run(_ollama_provider(handler), _embed_request("one", keep_alive="30m"))
+
+    assert json.loads(captured[0].content) == {
+        "model": "native-embed",
+        "input": ["one"],
+        "keep_alive": "30m",
+    }
 
 
 def test_ollama_embed_missing_model_maps_to_model_unavailable() -> None:

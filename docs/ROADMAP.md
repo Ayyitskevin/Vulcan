@@ -379,10 +379,20 @@ Items land one phase per PR in this order:
   stale "592 tests" in §4 was corrected. Intentional contract changes flagged
   per §1.4: safe-event allowlist shrink; capabilities response shape for
   embeddings-less configs.
-- **Ollama `keep_alive` passthrough** — optional per-alias `keep_alive`
-  (strict duration validator; config-rejected on non-Ollama providers),
-  injected into the chat/embed payload only when set. The core
-  unified-memory knob: pin workhorses, TTL the rest.
+- ~~**Ollama `keep_alive` passthrough**~~ — ✅ DONE (2026-08-23). Optional
+  per-alias `keep_alive` on `ModelConfig`: a strict validator accepts only
+  `-1`, `0`, or whole-number Go durations (`(\d+(ns|us|ms|s|m|h))+` — no
+  fractions, no signs beyond the bare pin), and the GatewayConfig cross-check
+  rejects it on non-Ollama providers at load (`keep_alive_ollama_only`,
+  mirroring `anthropic_embeddings_unsupported`). The value rides
+  `ProviderChatRequest`/`ProviderEmbeddingRequest` into the Ollama chat and
+  embed payloads only when set; unset aliases are byte-identical on the wire
+  (pinned by the pre-existing exact-payload tests). Other adapters can
+  provably never receive a non-None value, so they are unchanged. Tests:
+  duration grammar accept/reject, cross-provider rejection, payload pins for
+  chat + embed, and an end-to-end routing test proving the value reaches the
+  Ollama payload and never the log stream. The core unified-memory knob:
+  pin workhorses, TTL the rest.
 - **Operator memory-lifecycle CLI** — `vulcan ps` / `vulcan unload <alias>` /
   `vulcan warmup <alias>`, CLI-direct-to-Ollama (no new HTTP admin surface),
   hosted aliases refused loudly with zero network calls.

@@ -356,7 +356,9 @@ multi-provider operator can tell which upstream failed.
   be a contract change with its own privacy review, not a parser change.
 
 **Ollama** keeps its v1 adapter behavior byte-for-byte on the wire (chat
-payload, `/api/tags` probing, tagged-name matching, 404 classification).
+payload, `/api/tags` probing, tagged-name matching, 404 classification). The
+one additive exception: an alias with a configured `keep_alive` adds that key
+to the chat and embed payloads; aliases without it stay byte-identical.
 
 ## Migration from v1
 

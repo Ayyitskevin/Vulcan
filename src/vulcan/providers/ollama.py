@@ -133,6 +133,10 @@ class OllamaProvider:
             options["num_predict"] = request.max_tokens
         if options:
             payload["options"] = options
+        # Residency knob, only when the operator configured one: absent means
+        # byte-identical wire behavior to before this field existed.
+        if request.keep_alive is not None:
+            payload["keep_alive"] = request.keep_alive
         return payload
 
     @staticmethod
@@ -240,6 +244,9 @@ class OllamaProvider:
             "model": request.provider_model,
             "input": list(request.inputs),
         }
+        # Same residency passthrough as chat; unset means byte-identical.
+        if request.keep_alive is not None:
+            payload["keep_alive"] = request.keep_alive
 
         try:
             response = await self._client.post("/api/embed", json=payload)

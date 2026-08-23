@@ -114,6 +114,7 @@ provider_model = "an-installed-model"  # provider-native name, never exposed
 capabilities = ["chat"]
 description = "Optional description"
 class = "code"  # optional short routing label, surfaced in /v1/models
+keep_alive = "2h"  # optional, Ollama aliases only: residency TTL ("-1" pins, "0" unloads)
 ```
 
 Provider IDs are operator-chosen, match `[a-z0-9][a-z0-9_-]*`, and appear in API
@@ -121,6 +122,13 @@ metadata and logs (they are safe, non-secret values). Startup requires at least 
 provider, at least one model with the callable `chat` capability, and every
 `models[].provider` to name a configured provider. Declare
 `capabilities = ["chat", "embeddings"]` on an alias that should serve both.
+
+`keep_alive` is the per-alias Ollama residency knob: `"-1"` pins the model
+resident, `"0"` unloads it after each request, and a Go duration such as
+`"30m"` or `"2h30m"` sets an idle TTL (whole-number segments only). It rides
+inside the request the gateway already makes — no extra upstream calls. Omit
+it to inherit the Ollama server's own keep-alive policy; setting it on a
+non-Ollama provider is rejected at startup (`keep_alive_ollama_only`).
 
 ### Adding a provider and model alias
 

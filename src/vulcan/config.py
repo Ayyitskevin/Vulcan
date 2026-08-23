@@ -203,6 +203,11 @@ class ModelConfig(StrictConfigModel):
     # "hosted-chat"), surfaced in /v1/models so agents can read the operator's
     # class → alias mapping from the gateway. Never used for routing.
     class_: str | None = Field(default=None, alias="class", max_length=64)
+    # Optional Ollama residency knob, passed through to the upstream payload
+    # untouched: "-1" pins the model resident, "0" unloads it after the
+    # request, a Go duration ("5m", "2h30m") sets an idle TTL. Ollama-only;
+    # the GatewayConfig cross-check rejects it on other providers at load.
+    keep_alive: str | None = Field(default=None, max_length=64)
 
     @field_validator("provider_model")
     @classmethod
@@ -210,6 +215,15 @@ class ModelConfig(StrictConfigModel):
         if not value.strip():
             raise ValueError("provider_model must not be blank")
         return value
+
+    @field_validator("keep_alive")
+    @classmethod
+    def keep_alive_must_be_a_go_duration(cls, value: str | None) -> str | None:
+        if value is None or value in ("-1", "0"):
+            return value
+        if re.fullmatch(r"(\d+(ns|us|ms|s|m|h))+", value):
+            return value
+        raise ValueError('keep_alive must be "-1", "0", or a Go duration like "5m" or "2h30m"')
 
 
 class ReadinessConfig(StrictConfigModel):
@@ -358,6 +372,13 @@ class GatewayConfig(StrictConfigModel):
                 raise PydanticCustomError(
                     "anthropic_embeddings_unsupported",
                     "anthropic providers do not support the embeddings capability",
+                )
+            # keep_alive is an Ollama residency knob: reject it on any other
+            # provider at load rather than silently dropping it at request time.
+            if model.keep_alive is not None and provider.type != "ollama":
+                raise PydanticCustomError(
+                    "keep_alive_ollama_only",
+                    "keep_alive applies only to models on ollama-typed providers",
                 )
         return self
 
