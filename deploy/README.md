@@ -137,21 +137,20 @@ service — it shares nothing but the state directory.
 One-time setup (operator):
 
 ```bash
-# 1. Register the forge source (admin-scoped token required). The secret is
-#    shown ONCE; losing it means re-registering.
-curl -fsS -X POST http://100.125.80.91:8300/event-sources \
-  -H "Authorization: Bearer <admin-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "vulcan", "kind": "github"}'
-# → 201 {..., "secret": "evtsec_…"}
+# 1. Create the standing issue the digest lands on (any project), e.g.
+#    "Vulcan daily usage digest" → note its key (MWS-13 on the reference
+#    deploy).
 
-# 2. Create the standing issue the digest lands on (any project), e.g.
-#    "Vulcan daily usage digest" → VUL-1.
-
-# 3. Configure the reporter (0600, untracked — the secret lives here only).
+# 2. Stage the reporter env (0600, untracked — the secret lives here only)
+#    and set ATHENA_ISSUE_KEY to that key.
 cp deploy/usage-reporter.env.example ~/deploy/vulcan-data/usage-reporter.env
 chmod 600 ~/deploy/vulcan-data/usage-reporter.env
-# Edit: ATHENA_FORGE_SOURCE=vulcan, ATHENA_FORGE_SECRET=evtsec_…, ATHENA_ISSUE_KEY=VUL-1
+
+# 3. Register the forge source (admin-scoped Athena token — mint one for
+#    this call, revoke it after). Athena shows the secret ONCE; the script
+#    pipes it straight into the env file and never prints it. A lost secret
+#    means delete + re-register from the Athena admin cockpit.
+ATHENA_ADMIN_TOKEN=<token> bash deploy/register-reporter-source.sh
 
 # 4. Install the units and enable the timer (not the service).
 sudo cp deploy/vulcan-usage-reporter.service deploy/vulcan-usage-reporter.timer /etc/systemd/system/
