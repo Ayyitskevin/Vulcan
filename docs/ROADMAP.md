@@ -344,3 +344,55 @@ billing/cost tracking beyond `/v1/usage` counters, credential storage,
 hosted-provider auto-probing, per-vendor adapters, external telemetry, and a
 client SDK (revisit when at least two consumers exist). If a change seems to
 require one of these, stop and ask instead of building it.
+
+---
+
+## 11. Phase 5 — Headless-harness hardening (operator-directed, 2026-08-23)
+
+The operator directed a "best headless harness for headless mini PCs" push,
+planned from mickey's live layout (unattended unified-memory box; full plan:
+`~/ai-workspace/kimi/notes/2026-08-23_vulcan-headless-harness-plan.md`).
+Items land one phase per PR in this order:
+
+- ~~**CI runs the full gate**~~ — ✅ DONE (2026-08-23). CI now runs
+  `uv run python scripts/smoke.py` after pytest on both matrix legs, closing
+  the drift with the §1 four-command gate. Smoke needs only stdlib + `ss`
+  (iproute2 is preinstalled on `ubuntu-latest`).
+- ~~**`usage_reporter.py` test harness**~~ — ✅ DONE (2026-08-23).
+  `tests/test_usage_reporter.py` (29 tests) loads the script by path
+  (scripts/ is not a package; the `sys.modules` registration before
+  `exec_module` is required for `@dataclass`), fakes the urllib opener —
+  the same no-real-network guarantee MockTransport gives the gateway suite —
+  and pins baseline/reset/delta honesty, HMAC signature recomputation, exit
+  codes 0/1/2, and sentinel leak rules: the forge secret never reaches the
+  wire body, headers, stdout, stderr, or the state file, and prompt-shaped
+  payload fields never propagate into the digest. Repeat for any new
+  script surface: fake the transport, recompute the signature, sentinel the
+  secret.
+- **Truthfulness fixes** — remove the dead `provider_failed` event from the
+  safe-event allowlist (never emitted) and derive `/v1/capabilities` from
+  configured reality instead of static schema defaults. Fix the stale "592
+  tests" count in §4 while there.
+- **Ollama `keep_alive` passthrough** — optional per-alias `keep_alive`
+  (strict duration validator; config-rejected on non-Ollama providers),
+  injected into the chat/embed payload only when set. The core
+  unified-memory knob: pin workhorses, TTL the rest.
+- **Operator memory-lifecycle CLI** — `vulcan ps` / `vulcan unload <alias>` /
+  `vulcan warmup <alias>`, CLI-direct-to-Ollama (no new HTTP admin surface),
+  hosted aliases refused loudly with zero network calls.
+- **Gateway concurrency bound** — `[server] max_concurrent_requests`;
+  non-blocking semaphore over the inference endpoints, saturated ⇒ typed 503
+  `gateway_overloaded` (a hard reject, not a retry). Liveness endpoints
+  ungated.
+- **systemd watchdog** — raw-socket `sd_notify` heartbeats on the uvicorn
+  event loop (~40 owned lines, no new dependency); `Type=notify` +
+  `WatchdogSec=30` land in the unit only together with the heartbeat.
+
+Trigger-gated, design pre-agreed: `GET /metrics` when an actual scraper
+exists on mickey (hand-rolled exposition, no prometheus-client dep); ledger
+boot-time size-cap rotation when the ledger reaches tens of MB (never
+logrotate — rename mode never rotates a held fd, copytruncate poisons
+replay). Refused: SIGHUP config reload (`vulcan check` + restart runbook
+covers the hazard), in-app log streaming (journald already streams), runtime
+routing mutation, hosted lifecycle calls, new dependencies for notify or
+metrics.
