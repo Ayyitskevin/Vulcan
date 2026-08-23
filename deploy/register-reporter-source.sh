@@ -41,14 +41,15 @@ if [ "$status" != "201" ]; then
   echo "registration refused: HTTP $status — $body" >&2
   exit 1
 fi
-printf '%s' "$body" |
-  ENV_FILE="$ENV_FILE" SOURCE_NAME="$SOURCE_NAME" python3 - <<'PY'
+# The body rides an environment variable, NOT a pipe: `python3 - <<heredoc`
+# already spends stdin on the program text, so piped data is silently
+# discarded — the trap that lost the first registration's one-time secret.
+RESPONSE_BODY="$body" ENV_FILE="$ENV_FILE" SOURCE_NAME="$SOURCE_NAME" python3 - <<'PY'
 import json
 import os
 import re
-import sys
 
-response = json.load(sys.stdin)
+response = json.loads(os.environ["RESPONSE_BODY"])
 secret = response.get("secret", "")
 if not secret.startswith("evtsec_"):
     raise SystemExit(f"registration answered without a secret: keys {sorted(response)}")
