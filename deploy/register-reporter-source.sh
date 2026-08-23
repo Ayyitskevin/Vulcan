@@ -25,10 +25,23 @@ ENV_FILE="${USAGE_REPORTER_ENV:-/home/kevin-lee/deploy/vulcan-data/usage-reporte
   exit 2
 }
 
-curl -fsS -X POST "$ATHENA_BASE_URL/event-sources" \
+# Status captured separately so a refusal surfaces as its own error body —
+# error bodies carry no secret; only a 201 body (which does) reaches python.
+# NOTE the role/scope trap: Athena caps token scope by USER role, so this
+# needs an admin-scope token on an admin-ROLE user. The cockpit's
+# "onboard agent" flow mints member-role agent users whose admin-scoped
+# tokens still 403 here — mint from your own admin account instead.
+response="$(curl -sS -w $'\n%{http_code}' -X POST "$ATHENA_BASE_URL/event-sources" \
   -H "Authorization: Bearer $ATHENA_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"name\": \"$SOURCE_NAME\", \"kind\": \"github\"}" |
+  -d "{\"name\": \"$SOURCE_NAME\", \"kind\": \"github\"}")"
+status="${response##*$'\n'}"
+body="${response%$'\n'*}"
+if [ "$status" != "201" ]; then
+  echo "registration refused: HTTP $status — $body" >&2
+  exit 1
+fi
+printf '%s' "$body" |
   ENV_FILE="$ENV_FILE" SOURCE_NAME="$SOURCE_NAME" python3 - <<'PY'
 import json
 import os
