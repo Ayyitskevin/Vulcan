@@ -407,10 +407,19 @@ Items land one phase per PR in this order:
   by monkeypatching `cli._ollama_client`; pins the refusal-before-network
   guarantee (factory never invoked for refused aliases) and the
   native-name/exception-text leak rules on success and error paths alike.
-- **Gateway concurrency bound** — `[server] max_concurrent_requests`;
-  non-blocking semaphore over the inference endpoints, saturated ⇒ typed 503
-  `gateway_overloaded` (a hard reject, not a retry). Liveness endpoints
-  ungated.
+- ~~**Gateway concurrency bound**~~ — ✅ DONE (2026-08-23). `[server]
+  max_concurrent_requests` (strict positive int; unset = unbounded, today's
+  behavior) puts one `asyncio.Semaphore` across `chat`/`chat_stream`/`embed`.
+  Admission is non-blocking (`locked()` then `acquire()`, no suspension point
+  between — exact on the event loop); saturation raises `gateway_overloaded`
+  (503, retryable) before provider selection, so refused requests make zero
+  upstream calls and consume no budget slot. Slots are held for the full
+  stream lifetime and released in the same `finally` as unsettled budget
+  reservations; liveness/discovery endpoints are never gated. Tests
+  (`tests/test_concurrency.py`, 7): saturation rejects chat+embed without
+  reaching the provider, slot release on completion/mid-stream
+  abandon/provider error, unbounded default, constructor validation, and the
+  HTTP envelope + ungated-liveness pin; config grammar in `test_config.py`.
 - **systemd watchdog** — raw-socket `sd_notify` heartbeats on the uvicorn
   event loop (~40 owned lines, no new dependency); `Type=notify` +
   `WatchdogSec=30` land in the unit only together with the heartbeat.

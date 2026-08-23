@@ -148,6 +148,18 @@ class BudgetExhaustedError(VulcanError):
         super().__init__(details={"seat": seat, "window_resets_at": window_resets_at})
 
 
+class GatewayOverloadedError(VulcanError):
+    """The configured in-flight bound is reached: a hard reject, not a queue."""
+
+    code = "gateway_overloaded"
+    status_code = 503
+    retryable = True
+    message = (
+        "The gateway's in-flight request bound is reached. The caller owns "
+        "any retry — Vulcan never queues, reroutes, or retries."
+    )
+
+
 class ConfigurationError(VulcanError):
     code = "configuration_error"
     status_code = 500

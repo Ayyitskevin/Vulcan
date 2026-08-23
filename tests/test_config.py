@@ -775,3 +775,34 @@ def test_model_keep_alive_is_rejected_on_non_ollama_providers(
 
     error_types = {item["type"] for item in raised.value.errors(include_url=False)}
     assert "keep_alive_ollama_only" in error_types
+
+
+# ── Optional in-flight concurrency bound ──────────────────────────────────────
+
+
+def test_server_max_concurrent_requests_defaults_to_unbounded(
+    valid_config_document: dict[str, Any],
+) -> None:
+    config = GatewayConfig.model_validate(valid_config_document)
+
+    assert config.server.max_concurrent_requests is None
+
+
+def test_server_max_concurrent_requests_accepts_a_positive_integer(
+    valid_config_document: dict[str, Any],
+) -> None:
+    valid_config_document["server"]["max_concurrent_requests"] = 2
+
+    config = GatewayConfig.model_validate(valid_config_document)
+
+    assert config.server.max_concurrent_requests == 2
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "two", True])
+def test_server_max_concurrent_requests_rejects_non_positive_or_non_integer(
+    valid_config_document: dict[str, Any], value: object
+) -> None:
+    valid_config_document["server"]["max_concurrent_requests"] = value
+
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(valid_config_document)

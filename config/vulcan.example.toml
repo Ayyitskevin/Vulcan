@@ -9,6 +9,11 @@ schema_version = 2
 host = "127.0.0.1" # loopback only
 port = 8140
 log_level = "INFO"
+# Optional in-flight bound for the inference endpoints (chat + embeddings).
+# Saturated means an immediate typed 503 (gateway_overloaded) — a hard reject,
+# never a queue; the caller owns any retry. On a single-GPU box, align this
+# with Ollama's OLLAMA_NUM_PARALLEL (e.g. 2-4). Omit for unbounded.
+# max_concurrent_requests = 2
 
 # Optional durable usage ledger: uncomment to make /v1/usage survive restarts.
 # One JSON line per completed request — never message content. See README.

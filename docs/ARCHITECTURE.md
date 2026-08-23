@@ -294,6 +294,18 @@ optional `seat` label) the caller.
   Unlabeled requests count everywhere else; the label is never forwarded
   upstream (pinned by `tests/test_seat.py` sentinels) and carries no
   authentication or budget semantics — it is voluntary caller metadata.
+- **The concurrency bound is admission control, not a queue (added after
+  v2).** `[server] max_concurrent_requests` (unset = unbounded) puts one
+  `asyncio.Semaphore` across `chat`, `chat_stream`, and `embed`. Admission is
+  non-blocking (`locked()` then `acquire()` with no suspension point between
+  them, so it is exact on the event loop); a saturated gateway raises
+  `gateway_overloaded` (503, retryable) before provider selection, so refused
+  requests make zero upstream calls and consume no budget slot. Slots are
+  held for the full stream lifetime and released in the same `finally` that
+  returns unsettled budget reservations, so completion, mid-stream
+  disconnect, and provider error all release. Liveness and discovery
+  endpoints are never gated. On a single-GPU box this is the honest
+  backpressure Ollama's own `MAX_QUEUE` provides one layer down.
 
 ## Error normalization
 

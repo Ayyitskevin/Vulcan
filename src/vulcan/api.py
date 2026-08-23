@@ -205,6 +205,7 @@ def create_app(
     gateway_kwargs: dict[str, Any] = {
         "clock": clock,
         "readiness_ttl_seconds": config.readiness.probe_ttl_seconds,
+        "max_concurrent_requests": config.server.max_concurrent_requests,
     }
     if id_factory is not None:
         gateway_kwargs["id_factory"] = id_factory

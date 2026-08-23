@@ -85,6 +85,10 @@ schema_version = 2
 host = "127.0.0.1" # default; loopback only
 port = 8140         # default; 1..65535
 log_level = "INFO" # DEBUG, INFO, WARNING, ERROR, or CRITICAL
+# max_concurrent_requests = 2  # optional in-flight bound on the inference
+# endpoints; saturated = immediate typed 503 gateway_overloaded (a hard
+# reject, never a queue — the caller owns any retry). On a single-GPU box,
+# align with Ollama's OLLAMA_NUM_PARALLEL. Omit for unbounded.
 
 [readiness]
 probe_ttl_seconds = 5.0  # optional; 0..60, default 5; 0 = never reuse
@@ -510,6 +514,7 @@ request values and provider bodies are never echoed. Provider-side failures carr
 | 502 | `provider_protocol_error` | The provider returned malformed or incomplete data. |
 | 503 | `missing_credential` | The provider's `api_key_env` variable is unset or unusable. |
 | 503 | `provider_unavailable` | The provider cannot be reached (or upstream 503/529). |
+| 503 | `gateway_overloaded` | The configured in-flight request bound is reached; retryable — the caller owns any retry, Vulcan never queues. |
 | 503 | `model_unavailable` | The alias is configured but the native model is absent upstream. |
 | 504 | `provider_timeout` | The finite provider timeout expired. |
 | 500 | `configuration_error` / `internal_error` | A safe gateway-side failure. Invalid startup configuration exits with a JSON `configuration_error` on stderr. |

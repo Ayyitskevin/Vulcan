@@ -14,6 +14,7 @@ from vulcan.budgets import BudgetBook
 from vulcan.config import Capability
 from vulcan.errors import (
     ConfigurationError,
+    GatewayOverloadedError,
     ModelUnavailableError,
     ProviderProtocolError,
     UnsupportedCapabilityError,
@@ -75,11 +76,14 @@ class Gateway:
         readiness_ttl_seconds: float = READINESS_PROBE_TTL_SECONDS,
         usage: UsageRecorder | None = None,
         budgets: BudgetBook | None = None,
+        max_concurrent_requests: int | None = None,
     ) -> None:
         if readiness_ttl_seconds < 0:
             raise ValueError("readiness_ttl_seconds must be non-negative")
         if not providers:
             raise ValueError("at least one provider must be configured")
+        if max_concurrent_requests is not None and max_concurrent_requests < 1:
+            raise ValueError("max_concurrent_requests must be positive")
         self.registry = registry
         self.providers = dict(providers)
         self._clock = clock
@@ -89,6 +93,32 @@ class Gateway:
         self._probe_locks: dict[str, asyncio.Lock] = {}
         self._usage = usage if usage is not None else UsageRecorder()
         self._budgets = budgets
+        self._concurrency = (
+            asyncio.Semaphore(max_concurrent_requests)
+            if max_concurrent_requests is not None
+            else None
+        )
+
+    async def _admit(self) -> bool:
+        """Take an in-flight slot without queueing; False when saturated.
+
+        ``locked()`` then ``acquire()`` with no suspension point between them
+        is atomic on the event loop, so exactly the configured number of
+        callers hold slots and every extra caller is refused immediately —
+        backpressure, never a retry, queue, or reroute.
+        """
+
+        semaphore = self._concurrency
+        if semaphore is None:
+            return True
+        if semaphore.locked():
+            return False
+        await semaphore.acquire()
+        return True
+
+    def _release_admission(self) -> None:
+        if self._concurrency is not None:
+            self._concurrency.release()
 
     def _provider_for(self, provider_id: str) -> Provider:
         """Exact routing: the configured provider or a loud configuration error."""
@@ -230,8 +260,12 @@ class Gateway:
         provider: Provider | None = None
         reservation: int | None = None
         settled = False
+        admitted = await self._admit()
         try:
             try:
+                if not admitted:
+                    # Hard reject, not a queue: the caller owns any retry.
+                    raise GatewayOverloadedError
                 if request.stream:
                     # Streaming belongs on chat_stream; the HTTP layer routes
                     # it there. Reaching here would silently buffer a stream.
@@ -291,7 +325,8 @@ class Gateway:
             )
         finally:
             # Covers VulcanError, CancelledError, and client disconnects
-            # alike: an unsettled reservation is always returned.
+            # alike: an unsettled reservation is always returned, and the
+            # in-flight slot always goes back.
             if (
                 reservation is not None
                 and not settled
@@ -303,6 +338,8 @@ class Gateway:
                     provider_id=provider.provider_id,
                     reservation_day=reservation,
                 )
+            if admitted:
+                self._release_admission()
 
     def _select_provider(
         self,
@@ -409,8 +446,12 @@ class Gateway:
         provider: Provider | None = None
         reservation: int | None = None
         settled = False
+        admitted = await self._admit()
         try:
             try:
+                if not admitted:
+                    # Hard reject, not a queue: the caller owns any retry.
+                    raise GatewayOverloadedError
                 model, provider = self._select_provider(request, metadata)
                 if self._budgets is not None:
                     # Budgets gate BEFORE the upstream call: over-budget
@@ -511,7 +552,8 @@ class Gateway:
                     await aclose()
         finally:
             # Covers VulcanError, CancelledError, and generator aclose() at
-            # ANY yield point: an unsettled reservation is always returned.
+            # ANY yield point: an unsettled reservation is always returned,
+            # and the in-flight slot always goes back.
             if (
                 reservation is not None
                 and not settled
@@ -523,6 +565,8 @@ class Gateway:
                     provider_id=provider.provider_id,
                     reservation_day=reservation,
                 )
+            if admitted:
+                self._release_admission()
 
     async def embed(
         self,
@@ -543,8 +587,12 @@ class Gateway:
         provider: Provider | None = None
         reservation: int | None = None
         settled = False
+        admitted = await self._admit()
         try:
             try:
+                if not admitted:
+                    # Hard reject, not a queue: the caller owns any retry.
+                    raise GatewayOverloadedError
                 model = self.registry.require_capability(request.model, Capability.EMBEDDINGS)
                 provider = self._provider_for(model.provider_id)
                 metadata["provider"] = provider.provider_id
@@ -611,7 +659,8 @@ class Gateway:
             )
         finally:
             # Covers VulcanError, CancelledError, and client disconnects
-            # alike: an unsettled reservation is always returned.
+            # alike: an unsettled reservation is always returned, and the
+            # in-flight slot always goes back.
             if (
                 reservation is not None
                 and not settled
@@ -623,6 +672,8 @@ class Gateway:
                     provider_id=provider.provider_id,
                     reservation_day=reservation,
                 )
+            if admitted:
+                self._release_admission()
 
     def usage_snapshot(self) -> UsageSnapshot:
         """Process-lifetime counters for completed requests."""

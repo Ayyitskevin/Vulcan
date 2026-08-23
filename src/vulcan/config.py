@@ -40,6 +40,9 @@ class ServerConfig(StrictConfigModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8140, ge=1, le=65535, strict=True)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    # Optional in-flight bound for the inference endpoints: saturated means an
+    # immediate typed 503 (gateway_overloaded), never a queue. None = unbounded.
+    max_concurrent_requests: int | None = Field(default=None, ge=1, strict=True)
 
     @field_validator("host")
     @classmethod
