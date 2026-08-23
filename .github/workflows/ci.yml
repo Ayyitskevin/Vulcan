@@ -38,3 +38,6 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run pytest
+      # Gate command 4 of 4 (docs/ROADMAP.md §1): real-process smoke on an
+      # ephemeral loopback port; stdlib + `ss` only, both on ubuntu-latest.
+      - run: uv run python scripts/smoke.py
