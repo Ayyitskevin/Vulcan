@@ -598,6 +598,14 @@ exact chat reply, checks logs for prompt/response sentinels, and shuts the proce
 down. Tests exercise hosted providers only through mocked transports; nothing in
 the suite contacts a real API.
 
+Because nothing in the suite contacts a real API, the suite alone cannot catch
+real-Ollama contract drift. `uv run python scripts/live_check.py --config
+<live vulcan.toml>` is the operator-run counterpart (gate command 5 — deployment
+host only, never CI): it proves the RUNNING gateway against its real Ollama —
+health, models, one chat, one embedding, the warmup/`ps`/unload round trip on an
+embedding alias, and usage metering — with declared side effects and one
+content-safe JSON line of output. Run it after any deploy or Ollama upgrade.
+
 CI runs the first four commands on both supported interpreters (3.12 and 3.13)
 from the same lock file, and does not cancel one version's job when the other
 fails.

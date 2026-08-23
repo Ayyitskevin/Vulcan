@@ -27,6 +27,12 @@ Read order before any work: `README.md` → `docs/ARCHITECTURE.md` → this file
    uv run pytest
    uv run python scripts/smoke.py
    ```
+   Command 5 — operator-run on the deployment host, never CI, after any
+   deploy or Ollama upgrade: `uv run python scripts/live_check.py --config
+   <live vulcan.toml>`. Rule 4 below bans the suite from real APIs, so the
+   suite can only pin what we believe Ollama's contract is; the live check
+   proves the belief against the real thing (that exact gap shipped the
+   embed-alias warmup/unload bug fixed in ac2889f).
 4. **Tests are extended, never replaced.** Existing assertions may only change
    when the contract they pin intentionally changes in your phase, and the PR
    description must call out every such change. Every new upstream surface
