@@ -174,7 +174,22 @@ if a colliding project key is ever created.
 
 When hosted providers are enabled, their keys go in
 `~/deploy/vulcan-data/.env` (mode `600`, untracked) as the variable names the
-config's `api_key_env` fields reference, and the commented `EnvironmentFile`
-line in the unit is uncommented. Keys never go in the TOML, the unit, or the
-repo. `vulcan check --config … --verify-credentials` confirms each key works
-without printing values.
+config's `api_key_env` fields reference, wired to the unit via the shipped
+**drop-in** — never by editing the installed unit file:
+
+```bash
+sudo mkdir -p /etc/systemd/system/vulcan.service.d
+sudo cp deploy/vulcan.service.d/local.conf /etc/systemd/system/vulcan.service.d/
+sudo systemctl daemon-reload && sudo systemctl restart vulcan
+```
+
+Why the drop-in is mandatory: every unit update replaces
+`/etc/systemd/system/vulcan.service` wholesale, so an edit made there — like
+uncommenting the `EnvironmentFile` line — silently reverts on the next
+`sudo cp`. Exactly that happened on 2026-08-23: the `Type=notify` unit flip
+reverted the hosted-keys line and every BYOK alias failed with
+`missing_credential` until the drop-in restored it. Drop-ins survive unit
+replacement. Keys never go in the TOML, the unit, or the repo.
+`vulcan check --config … --verify-credentials` confirms each key works
+without printing values (run it with the env file sourced — see the
+`check` trap above).
