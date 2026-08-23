@@ -393,9 +393,20 @@ Items land one phase per PR in this order:
   chat + embed, and an end-to-end routing test proving the value reaches the
   Ollama payload and never the log stream. The core unified-memory knob:
   pin workhorses, TTL the rest.
-- **Operator memory-lifecycle CLI** — `vulcan ps` / `vulcan unload <alias>` /
-  `vulcan warmup <alias>`, CLI-direct-to-Ollama (no new HTTP admin surface),
-  hosted aliases refused loudly with zero network calls.
+- ~~**Operator memory-lifecycle CLI**~~ — ✅ DONE (2026-08-23). `vulcan ps` /
+  `vulcan unload <alias>` / `vulcan warmup <alias>`, CLI-direct-to-Ollama with
+  no new gateway HTTP surface: `ps` maps `/api/ps` residents back to aliases
+  (unmatched residents flagged `unmanaged`; non-Ollama providers listed as
+  `skipped`, never contacted); `unload` sends one `keep_alive = 0` generate;
+  `warmup` sends one empty non-streaming generate carrying the alias's
+  configured `keep_alive` when set. Hosted/deterministic aliases are refused
+  (exit 2) before any client is built, response bodies are never read
+  (classification by status alone), and native model names appear only in
+  `ps` unmanaged rows — the documented operator-terminal exception. Tests
+  (`tests/test_cli_ollama_ops.py`, 10): MockTransport client factory injected
+  by monkeypatching `cli._ollama_client`; pins the refusal-before-network
+  guarantee (factory never invoked for refused aliases) and the
+  native-name/exception-text leak rules on success and error paths alike.
 - **Gateway concurrency bound** — `[server] max_concurrent_requests`;
   non-blocking semaphore over the inference endpoints, saturated ⇒ typed 503
   `gateway_overloaded` (a hard reject, not a retry). Liveness endpoints

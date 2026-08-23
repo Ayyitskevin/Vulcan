@@ -176,6 +176,21 @@ A new OpenAI-compatible vendor needs no application code: add another
   (already content-safe). Exit codes: 0 = success, 1 = gateway unreachable or a
   non-success response (the sanitized error names the fix), 2 = invalid
   configuration. Loopback only, like everything else.
+- `uv run vulcan ps --config vulcan.toml` lists the models currently resident
+  on each Ollama provider (`GET /api/ps`), mapped back to their configured
+  aliases; residents matching no alias are flagged `unmanaged`. Hosted and
+  deterministic providers are listed as `skipped` and never contacted. Exit
+  codes: 0 = all Ollama providers answered, 1 = at least one unreachable.
+- `uv run vulcan unload <alias> --config vulcan.toml` and
+  `uv run vulcan warmup <alias> --config vulcan.toml` manage Ollama residency
+  by public alias: `unload` expires the model immediately (one
+  `keep_alive = 0` call), `warmup` pre-loads it (one empty generate, carrying
+  the alias's configured `keep_alive` when set). Aliases on hosted or
+  deterministic providers are refused with exit 2 before any network call —
+  residency management never touches a billable endpoint. Output names the
+  public alias only; native model names appear solely in `ps` unmanaged rows.
+  Exit codes: 0 = done, 1 = provider unreachable/error/not installed,
+  2 = unknown alias or non-Ollama provider.
 
 ### Migrating from schema v1
 
