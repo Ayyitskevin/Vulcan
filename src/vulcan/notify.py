@@ -6,7 +6,8 @@ datagram, so it is implemented here rather than imported. Semantics:
 * ``NOTIFY_SOCKET`` unset → every entry point is a no-op (dev, CI, smoke).
 * ``NOTIFY_SOCKET`` set → :func:`start` announces ``READY=1`` and posts
   ``WATCHDOG=1`` heartbeats on the calling event loop at half of
-  ``WATCHDOG_USEC``. Heartbeats must run on the uvicorn loop: a wedged loop
+  ``WATCHDOG_USEC`` — but only when ``WATCHDOG_PID`` is unset or names this
+  process (sd_watchdog_enabled semantics). Heartbeats must run on the uvicorn loop: a wedged loop
   stops heartbeats, which is precisely the failure the watchdog exists to
   detect.
 * A set-but-undeliverable ``NOTIFY_SOCKET`` fails startup loudly (systemd
@@ -47,6 +48,16 @@ def notify_ready() -> None:
 
 
 def _heartbeat_interval_seconds() -> float | None:
+    # sd_watchdog_enabled semantics: a set WATCHDOG_PID addresses exactly one
+    # process; heartbeating on another's behalf would mask that process's
+    # death. Unset means the watchdog env is ours.
+    pid = os.environ.get("WATCHDOG_PID")
+    if pid is not None:
+        try:
+            if int(pid) != os.getpid():
+                return None
+        except ValueError:
+            return None
     usec = os.environ.get("WATCHDOG_USEC")
     if not usec:
         return None

@@ -182,7 +182,8 @@ A new OpenAI-compatible vendor needs no application code: add another
   configuration. Loopback only, like everything else.
 - `uv run vulcan ps --config vulcan.toml` lists the models currently resident
   on each Ollama provider (`GET /api/ps`), mapped back to their configured
-  aliases; residents matching no alias are flagged `unmanaged`. Hosted and
+  aliases (the first configured alias wins when several share one native
+  model); residents matching no alias are flagged `unmanaged`. Hosted and
   deterministic providers are listed as `skipped` and never contacted. Exit
   codes: 0 = all Ollama providers answered, 1 = at least one unreachable.
 - `uv run vulcan unload <alias> --config vulcan.toml` and

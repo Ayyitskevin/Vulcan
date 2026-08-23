@@ -226,7 +226,12 @@ async def _ps_report(
     """
 
     factory = make_client or _ollama_client
-    alias_by_native = {(model.provider, model.provider_model): model.id for model in config.models}
+    # Two aliases can share one native model; the first configured alias wins
+    # this mapping, deterministically. Display-only: unload/warmup take the
+    # alias directly and are unaffected.
+    alias_by_native: dict[tuple[str, str], str] = {}
+    for model in config.models:
+        alias_by_native.setdefault((model.provider, model.provider_model), model.id)
     providers: list[dict[str, Any]] = []
     failures = 0
     for provider_id, provider in config.providers.items():
@@ -237,7 +242,11 @@ async def _ps_report(
         try:
             response = await client.get("/api/ps")
             entries = response.json().get("models") if response.is_success else None
-            if not isinstance(entries, list):
+            # A non-list, or a list holding anything but objects, is a
+            # malformed answer — same handling as no answer at all.
+            if not isinstance(entries, list) or not all(
+                isinstance(entry, dict) for entry in entries
+            ):
                 entries = None
         except (httpx.HTTPError, ValueError):
             entries = None

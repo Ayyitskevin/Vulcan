@@ -55,6 +55,12 @@ capabilities = ["chat"]
 keep_alive = "1h"
 
 [[models]]
+id = "local-chat-alt"
+provider = "local-ollama"
+provider_model = "{NATIVE_CHAT}"
+capabilities = ["chat"]
+
+[[models]]
 id = "local-embed"
 provider = "local-ollama"
 provider_model = "{NATIVE_EMBED}"
@@ -141,6 +147,50 @@ def test_ps_maps_resident_models_to_aliases_and_flags_unmanaged(
     assert rogue["alias"] is None
     assert rogue["unmanaged"] is True
     assert rogue["name"] == "rogue-model:latest"
+
+
+def test_ps_shared_native_model_maps_to_first_configured_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # local-chat and local-chat-alt both ride NATIVE_CHAT; the first
+    # configured alias wins the ps mapping, deterministically.
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"models": [{"name": NATIVE_CHAT, "size_vram": 1, "expires_at": "soon"}]},
+        )
+
+    monkeypatch.setattr(cli, "_ollama_client", _factory([], handler))
+
+    exit_code = cli.main(["ps", "--config", str(_write_config(tmp_path))])
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    ollama = next(e for e in report["providers"] if e["id"] == "local-ollama")
+    assert ollama["models"][0]["alias"] == "local-chat"
+
+
+def test_ps_treats_non_object_entries_as_a_malformed_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A models list holding anything but objects gets the same handling as no
+    # answer at all — a sanitized unreachable row, never a traceback.
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"models": [f"rogue-string-{NATIVE_CHAT}"]})
+
+    monkeypatch.setattr(cli, "_ollama_client", _factory([], handler))
+
+    exit_code = cli.main(["ps", "--config", str(_write_config(tmp_path))])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    ollama = next(e for e in json.loads(output)["providers"] if e["id"] == "local-ollama")
+    assert ollama["status"] == "unreachable"
+    assert NATIVE_CHAT not in output
 
 
 def test_ps_marks_unreachable_without_echoing_exception_text(

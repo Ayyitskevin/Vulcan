@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import socket
 import time
 from pathlib import Path
@@ -110,6 +111,25 @@ def test_watchdog_interval_parsing(
         monkeypatch.setenv("WATCHDOG_USEC", usec)
 
     assert notify._heartbeat_interval_seconds() == expected
+
+
+def test_watchdog_addressed_to_another_pid_disables_heartbeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # sd_watchdog_enabled semantics: WATCHDOG_PID names the one process the
+    # watchdog env addresses. Our own pid (or unset, above) heartbeats;
+    # another pid — or garbage — must not, or we would mask that process's
+    # death by beating on its behalf.
+    monkeypatch.setenv("WATCHDOG_USEC", "200000")
+
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid()))
+    assert notify._heartbeat_interval_seconds() == 0.1
+
+    monkeypatch.setenv("WATCHDOG_PID", str(os.getpid() + 1))
+    assert notify._heartbeat_interval_seconds() is None
+
+    monkeypatch.setenv("WATCHDOG_PID", "garbage")
+    assert notify._heartbeat_interval_seconds() is None
 
 
 def test_lifespan_announces_ready_and_stops_heartbeats(
