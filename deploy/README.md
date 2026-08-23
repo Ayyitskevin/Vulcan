@@ -36,9 +36,20 @@ curl -fsS http://127.0.0.1:8140/healthz
 ## Update flow
 
 ```bash
+bash ~/deploy/vulcan/deploy/update.sh
+```
+
+The script is the flow below made mechanical — use it rather than typing the
+steps, because the one step that must never be skipped is easy to skip: the
+deployed code validates the live config (`vulcan check`) BEFORE the restart,
+so a TOML key that landed ahead of the code that knows it fails the update
+with the old service still running, instead of taking the service down.
+
+```bash
 cd ~/deploy/vulcan
 git pull --ff-only
 uv sync --all-groups --locked
+uv run vulcan check --config ~/deploy/vulcan-data/vulcan.toml
 sudo systemctl restart vulcan
 curl -fsS http://127.0.0.1:8140/healthz
 ```
@@ -64,6 +75,20 @@ restarts it. Verify after install:
 ```bash
 systemctl show vulcan -p WatchdogUSec   # expect 30s
 systemctl status vulcan                 # expect "active (running)" post-READY
+```
+
+**Recovery drill** — run once after wiring the watchdog, and after any change
+to the unit or notify code, so the kill-and-restart path is proven rather
+than assumed (a watchdog that has never fired is a claim, not a mechanism):
+
+```bash
+kill -STOP "$(systemctl show vulcan -p MainPID --value)"  # simulate a wedge
+journalctl -u vulcan -f          # expect "Watchdog timeout" then a restart
+# SIGABRT queues against a stopped process, so systemd escalates to SIGKILL
+# after TimeoutStopSec — allow up to ~2 minutes end to end.
+curl -fsS http://127.0.0.1:8140/healthz   # recovered
+curl -s http://127.0.0.1:8140/v1/usage | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["ledger"])'  # replay happened
 ```
 
 Without `NOTIFY_SOCKET` in the environment (a plain shell, dev, CI) the
