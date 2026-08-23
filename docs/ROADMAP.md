@@ -420,9 +420,18 @@ Items land one phase per PR in this order:
   reaching the provider, slot release on completion/mid-stream
   abandon/provider error, unbounded default, constructor validation, and the
   HTTP envelope + ungated-liveness pin; config grammar in `test_config.py`.
-- **systemd watchdog** — raw-socket `sd_notify` heartbeats on the uvicorn
-  event loop (~40 owned lines, no new dependency); `Type=notify` +
-  `WatchdogSec=30` land in the unit only together with the heartbeat.
+- ~~**systemd watchdog**~~ — ✅ DONE (2026-08-23). `src/vulcan/notify.py` is
+  a raw-socket sd_notify client (~70 owned lines, no dependency — at a 4-dep
+  posture, one datagram does not justify `sdnotify`): `NOTIFY_SOCKET` unset
+  ⇒ complete no-op; set ⇒ `READY=1` at lifespan start plus `WATCHDOG=1`
+  heartbeats on the uvicorn loop at `WATCHDOG_USEC`/2 (a wedged loop stops
+  beating — that is the detection semantics); set-but-undeliverable ⇒
+  startup fails loud. `@`→NUL abstract-namespace translation included. The
+  unit gains `Type=notify` + `WatchdogSec=30` and must deploy together with
+  the code (a watchdog without the heartbeat kills a healthy process).
+  Tests (`tests/test_notify.py`, 10) use real AF_UNIX datagram receivers on
+  tmp paths — no mocking, no systemd — plus a lifespan integration pin that
+  heartbeats stop when the app shuts down.
 
 Trigger-gated, design pre-agreed: `GET /metrics` when an actual scraper
 exists on mickey (hand-rolled exposition, no prometheus-client dep); ledger

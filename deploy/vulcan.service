@@ -18,7 +18,13 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec pair with the app's sd_notify heartbeat
+# (src/vulcan/notify.py): READY=1 gates "started" on the lifespan actually
+# running, and a wedged event loop stops heartbeats so systemd restarts the
+# service — Restart=on-failure alone only catches process death. Deploy unit
+# and code together: a watchdog without the heartbeat kills a healthy process.
+Type=notify
+WatchdogSec=30
 User=kevin-lee
 Group=kevin-lee
 ExecStart=/home/kevin-lee/deploy/vulcan/.venv/bin/vulcan serve --config /home/kevin-lee/deploy/vulcan-data/vulcan.toml

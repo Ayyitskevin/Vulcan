@@ -47,6 +47,27 @@ The pull must be fast-forward only. A non-fast-forward pull means someone
 wrote to the deploy checkout directly — stop and reconcile, do not force.
 Config edits follow the same rule as everywhere else: take a timestamped
 backup of `vulcan-data/vulcan.toml` first, then `systemctl restart vulcan`.
+There is no config reload signal on purpose; the safe sequence for a config
+change is `uv run vulcan check --config vulcan-data/vulcan.toml` first
+(validates without starting a listener), then the restart.
+
+## Watchdog (Type=notify)
+
+The shipped unit runs `Type=notify` with `WatchdogSec=30`, paired with the
+app's built-in sd_notify heartbeat (`src/vulcan/notify.py` — raw datagrams,
+no dependency). `READY=1` at lifespan start gates "active" on the app
+actually serving; `WATCHDOG=1` heartbeats run on the uvicorn event loop at
+half the watchdog interval, so a wedged-but-alive process (the failure mode
+`Restart=on-failure` cannot see) stops beating and systemd kills and
+restarts it. Verify after install:
+
+```bash
+systemctl show vulcan -p WatchdogUSec   # expect 30s
+systemctl status vulcan                 # expect "active (running)" post-READY
+```
+
+Without `NOTIFY_SOCKET` in the environment (a plain shell, dev, CI) the
+heartbeat is a complete no-op, so nothing else changes.
 
 ## Logs
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
@@ -18,7 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response, StreamingResponse
 
-from vulcan import __version__
+from vulcan import __version__, notify
 from vulcan.budgets import BudgetBook, SeatLimits
 from vulcan.config import Capability, GatewayConfig
 from vulcan.errors import VulcanError
@@ -254,11 +256,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # systemd readiness + watchdog heartbeats; a no-op unless the unit
+        # sets NOTIFY_SOCKET. Runs on the serving loop on purpose: a wedged
+        # loop stops heartbeats, which is what the watchdog watches for.
+        notify_task = notify.start()
         try:
             yield
             for provider in selected_providers.values():
                 await provider.aclose()
         finally:
+            if notify_task is not None:
+                notify_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await notify_task
             # A provider aclose() failure must not orphan the ledger handle.
             if ledger is not None:
                 ledger.close()
