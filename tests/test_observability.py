@@ -153,7 +153,7 @@ def test_safe_json_formatter_emits_only_exception_class_and_redacted_metadata() 
         level=logging.ERROR,
         pathname=__file__,
         lineno=1,
-        msg="provider_failed",
+        msg="chat_failed",
         args=(),
         exc_info=exception_info,
     )
@@ -169,7 +169,7 @@ def test_safe_json_formatter_emits_only_exception_class_and_redacted_metadata() 
 
     assert payload["level"] == "ERROR"
     assert payload["logger"] == "vulcan.test"
-    assert payload["event"] == "provider_failed"
+    assert payload["event"] == "chat_failed"
     assert payload["provider"] == "deterministic"
     assert payload["content"] == REDACTED
     assert payload["nested"] == {"client_secret": REDACTED}
@@ -203,6 +203,24 @@ def test_formatter_never_renders_unapproved_event_arguments_or_reserved_metadata
     assert payload["timestamp"] != RESPONSE_SENTINEL
     assert PROMPT_SENTINEL not in rendered
     assert RESPONSE_SENTINEL not in rendered
+
+
+def test_retired_provider_failed_event_demotes_to_external_log() -> None:
+    # provider_failed was allowlisted but never emitted; it was removed from
+    # the safe set and must now demote like any other unknown event name.
+    record = logging.LogRecord(
+        name="vulcan.test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="provider_failed",
+        args=(),
+        exc_info=None,
+    )
+
+    rendered = SafeJsonFormatter().format(record)
+
+    assert json.loads(rendered)["event"] == "external_log"
 
 
 def test_api_logs_operational_counts_without_prompt_response_or_cause(

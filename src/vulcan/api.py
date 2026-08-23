@@ -20,7 +20,7 @@ from starlette.responses import Response, StreamingResponse
 
 from vulcan import __version__
 from vulcan.budgets import BudgetBook, SeatLimits
-from vulcan.config import GatewayConfig
+from vulcan.config import Capability, GatewayConfig
 from vulcan.errors import VulcanError
 from vulcan.gateway import Gateway
 from vulcan.providers.base import Provider
@@ -34,6 +34,7 @@ from vulcan.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     DiscoveryMetadata,
+    EmbeddingsCapability,
     EmbeddingsRequest,
     EmbeddingsResponse,
     ErrorBody,
@@ -444,10 +445,19 @@ def create_app(
     @app.get(
         "/v1/capabilities",
         response_model=CapabilitiesResponse,
+        response_model_exclude_none=True,
         responses=ERROR_RESPONSES,
     )
     async def capabilities() -> CapabilitiesResponse:
-        return CapabilitiesResponse(chat_completions=ChatCapability())
+        # Derived from configured reality: the callable set is the union of
+        # what configured aliases declare, and the embeddings block appears
+        # only when at least one alias declares it.
+        configured = set().union(*(model.capabilities for model in registry.list()))
+        return CapabilitiesResponse(
+            callable_capabilities=tuple(sorted(configured, key=str)),
+            chat_completions=ChatCapability(),
+            embeddings=(EmbeddingsCapability() if Capability.EMBEDDINGS in configured else None),
+        )
 
     async def _stream_response(payload: ChatCompletionRequest, request: Request) -> Response:
         """Render one chat stream as Server-Sent Events.

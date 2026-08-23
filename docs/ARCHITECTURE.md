@@ -238,9 +238,11 @@ paths; only the payload differs.
   an anthropic-typed provider is rejected at **config load**
   (`anthropic_embeddings_unsupported`) rather than at request time. The adapter
   still raises `unsupported_capability` as defence in depth.
-- **Capabilities.** `/v1/capabilities` reports `callable_capabilities`
-  `["chat", "embeddings"]` and an `embeddings` block carrying the input bounds.
-  Startup still requires at least one chat-capable model.
+- **Capabilities.** `/v1/capabilities` derives its answer from the configured
+  models: `callable_capabilities` is the union of what configured aliases
+  declare, and the `embeddings` block (with its input bounds) appears only when
+  at least one alias declares `embeddings`. Startup still requires at least one
+  chat-capable model, so the chat block is always present.
 
 ## Usage counters (added after v2)
 

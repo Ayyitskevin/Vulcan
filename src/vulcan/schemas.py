@@ -175,9 +175,11 @@ class EmbeddingsCapability(StrictSchema):
 class CapabilitiesResponse(StrictSchema):
     api_version: Literal["v1"] = "v1"
     model_discovery: Literal["configuration"] = "configuration"
-    callable_capabilities: tuple[Capability, ...] = (Capability.CHAT, Capability.EMBEDDINGS)
+    # Derived from the configured models by the route, never a static claim:
+    # the embeddings block is present only when an alias actually declares it.
+    callable_capabilities: tuple[Capability, ...]
     chat_completions: ChatCapability = Field(default_factory=ChatCapability)
-    embeddings: EmbeddingsCapability = Field(default_factory=EmbeddingsCapability)
+    embeddings: EmbeddingsCapability | None = None
 
 
 class AssistantMessage(StrictSchema):

@@ -32,7 +32,6 @@ _SAFE_EVENTS = frozenset(
         "embeddings_completed",
         "embeddings_failed",
         "internal_error",
-        "provider_failed",
         "readiness_probed",
         "readiness_reused",
         "request_complete",

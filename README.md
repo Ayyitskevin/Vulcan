@@ -201,7 +201,7 @@ disabled.
 | `GET` | `/healthz` | Gateway liveness (`status: ok`), API version, one entry per configured provider (`id`, `type`, honest `availability`), and model count. Optional `?refresh=true` forces a new probe. |
 | `GET` | `/v1/models` | Configured public aliases only: description, optional `class` routing label, declared capabilities, selected provider ID/type, and readiness annotation. Optional `?refresh=true`. |
 | `GET` | `/v1/models/{id}` | One configured public model with the same annotation; `model_not_found` if the alias is not configured. Optional `?refresh=true`. |
-| `GET` | `/v1/capabilities` | Callable v1 gateway features: chat (buffered and streaming), embeddings and their bounds, supported roles, and configuration-driven discovery. |
+| `GET` | `/v1/capabilities` | Callable v1 gateway features, derived from the configured models: chat (buffered and streaming), supported roles, configuration-driven discovery, and — only when at least one alias declares `embeddings` — the embeddings block with its bounds. |
 | `POST` | `/v1/chat/completions` | One selected-alias chat request routed to exactly one provider; buffered JSON by default, Server-Sent Events when `stream: true`. |
 | `POST` | `/v1/embeddings` | One selected-alias embedding batch routed to exactly one provider. |
 | `GET` | `/v1/usage` | Completed-request counters per alias, per provider, and per seat label; in-memory by default, durable across restarts with `[usage] ledger_path`; includes per-seat budget state when `[budgets]` is configured. |

@@ -85,7 +85,7 @@ predictability, safety, and honesty, not feature breadth.
 | Safe JSON logging + redaction | `src/vulcan/observability.py` |
 | CLI `serve` + `check` (credential presence without values) | `src/vulcan/cli.py` |
 | Real-process smoke test (all five endpoints) | `scripts/smoke.py` |
-| 592 tests, all upstream traffic mocked | `tests/` |
+| 628 tests, all upstream traffic mocked | `tests/` |
 
 ---
 
@@ -369,10 +369,16 @@ Items land one phase per PR in this order:
   payload fields never propagate into the digest. Repeat for any new
   script surface: fake the transport, recompute the signature, sentinel the
   secret.
-- **Truthfulness fixes** — remove the dead `provider_failed` event from the
-  safe-event allowlist (never emitted) and derive `/v1/capabilities` from
-  configured reality instead of static schema defaults. Fix the stale "592
-  tests" count in §4 while there.
+- ~~**Truthfulness fixes**~~ — ✅ DONE (2026-08-23). The dead
+  `provider_failed` event (allowlisted, never emitted) left `_SAFE_EVENTS`;
+  its formatter test moved to `chat_failed` and a demotion pin proves the old
+  name now renders as `external_log`. `/v1/capabilities` is derived from
+  `registry.list()`: `callable_capabilities` is the union of configured
+  capabilities and the `embeddings` block appears only when an alias declares
+  it (`response_model_exclude_none`, so the key is absent, not null). The
+  stale "592 tests" in §4 was corrected. Intentional contract changes flagged
+  per §1.4: safe-event allowlist shrink; capabilities response shape for
+  embeddings-less configs.
 - **Ollama `keep_alive` passthrough** — optional per-alias `keep_alive`
   (strict duration validator; config-rejected on non-Ollama providers),
   injected into the chat/embed payload only when set. The core

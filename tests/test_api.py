@@ -249,6 +249,43 @@ def test_capabilities_state_the_small_callable_contract_exactly() -> None:
     _assert_request_id(response)
 
 
+def test_capabilities_reflect_a_chat_only_configuration() -> None:
+    # The callable set and the embeddings block derive from the configured
+    # models: with no embeddings alias declared, both must be absent.
+    chat_only = GatewayConfig(
+        schema_version=2,
+        providers={
+            "test-provider": DeterministicProviderConfig(
+                type="deterministic",
+                response_text=REPLY_SENTINEL,
+            )
+        },
+        models=(
+            ModelConfig(
+                id="public-chat",
+                provider="test-provider",
+                provider_model=RUNTIME_SENTINEL,
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+        ),
+    )
+    with _client(create_app(chat_only)) as client:
+        response = client.get("/v1/capabilities")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "api_version": "v1",
+        "model_discovery": "configuration",
+        "callable_capabilities": ["chat"],
+        "chat_completions": {
+            "supported": True,
+            "streaming": True,
+            "message_roles": ["system", "user", "assistant"],
+        },
+    }
+    _assert_request_id(response)
+
+
 def test_deterministic_chat_response_is_stable_and_explicit() -> None:
     app = create_app(
         _config(),
