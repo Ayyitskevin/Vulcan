@@ -397,9 +397,11 @@ Items land one phase per PR in this order:
   `vulcan unload <alias>` / `vulcan warmup <alias>`, CLI-direct-to-Ollama with
   no new gateway HTTP surface: `ps` maps `/api/ps` residents back to aliases
   (unmatched residents flagged `unmanaged`; non-Ollama providers listed as
-  `skipped`, never contacted); `unload` sends one `keep_alive = 0` generate;
-  `warmup` sends one empty non-streaming generate carrying the alias's
-  configured `keep_alive` when set. Hosted/deterministic aliases are refused
+  `skipped`, never contacted); `unload` sends one `keep_alive = 0` load
+  request; `warmup` sends one empty load request carrying the alias's
+  configured `keep_alive` when set — chat aliases via `/api/generate`,
+  embedding-only aliases via `/api/embed` (embedding models refuse
+  `/api/generate`; caught live 2026-08-23, fixed same day). Hosted/deterministic aliases are refused
   (exit 2) before any client is built, response bodies are never read
   (classification by status alone), and native model names appear only in
   `ps` unmanaged rows — the documented operator-terminal exception. Tests

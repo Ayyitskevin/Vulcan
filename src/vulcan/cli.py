@@ -16,6 +16,7 @@ import uvicorn
 from vulcan.api import create_app
 from vulcan.config import (
     HOSTED_PROVIDER_TYPES,
+    Capability,
     ConfigLoadError,
     GatewayConfig,
     OllamaProviderConfig,
@@ -67,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     unload.add_argument("--config", type=Path, required=True, help="path to a Vulcan TOML config")
     warmup = subcommands.add_parser(
         "warmup",
-        help="pre-load the Ollama model backing an alias (one empty generate)",
+        help="pre-load the Ollama model backing an alias (one empty load request)",
     )
     warmup.add_argument("alias", help="configured alias on an ollama-typed provider")
     warmup.add_argument("--config", type=Path, required=True, help="path to a Vulcan TOML config")
@@ -297,19 +298,26 @@ async def _alias_action(
         ), 2
 
     body: dict[str, Any] = {"model": model.provider_model}
+    if Capability.CHAT in model.capabilities:
+        # An empty non-streaming generate loads the model without generating.
+        path = "/api/generate"
+        if action == "warmup":
+            body["prompt"] = ""
+            body["stream"] = False
+    else:
+        # Embedding-only models refuse /api/generate ("does not support
+        # generate"); an empty-input /api/embed loads or expires them instead.
+        path = "/api/embed"
+        body["input"] = []
     if action == "unload":
         # Ollama's documented unload: keep_alive 0 expires residency now.
         body["keep_alive"] = 0
-    else:
-        # An empty non-streaming generate loads the model without generating.
-        body["prompt"] = ""
-        body["stream"] = False
-        if model.keep_alive is not None:
-            body["keep_alive"] = model.keep_alive
+    elif model.keep_alive is not None:
+        body["keep_alive"] = model.keep_alive
 
     client = factory(provider)
     try:
-        response = await client.post("/api/generate", json=body)
+        response = await client.post(path, json=body)
     except httpx.HTTPError:
         return _cli_error(
             "provider_unreachable",

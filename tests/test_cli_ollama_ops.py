@@ -224,7 +224,35 @@ def test_warmup_sends_empty_generate_with_configured_keep_alive(
     assert NATIVE_CHAT not in out
 
 
-def test_warmup_without_configured_keep_alive_omits_the_key(
+def test_warmup_embeddings_alias_rides_the_embed_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Embedding-only models refuse /api/generate ("does not support generate"),
+    # so their load request is an empty-input /api/embed. No configured
+    # keep_alive on this alias means the key is omitted from wire and output.
+    captured: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"model": NATIVE_EMBED, "embeddings": []})
+
+    monkeypatch.setattr(cli, "_ollama_client", _factory([], handler))
+
+    exit_code = cli.main(["warmup", "local-embed", "--config", str(_write_config(tmp_path))])
+
+    assert exit_code == 0
+    assert len(captured) == 1
+    assert captured[0].url.path == "/api/embed"
+    assert json.loads(captured[0].content) == {"model": NATIVE_EMBED, "input": []}
+    out = capsys.readouterr().out
+    assert json.loads(out)["status"] == "warm"
+    assert "keep_alive" not in out
+    assert NATIVE_EMBED not in out
+
+
+def test_unload_embeddings_alias_rides_the_embed_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -233,16 +261,23 @@ def test_warmup_without_configured_keep_alive_omits_the_key(
 
     async def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return httpx.Response(200, json={"response": ""})
+        return httpx.Response(200, json={"model": NATIVE_EMBED, "embeddings": []})
 
     monkeypatch.setattr(cli, "_ollama_client", _factory([], handler))
 
-    exit_code = cli.main(["warmup", "local-embed", "--config", str(_write_config(tmp_path))])
+    exit_code = cli.main(["unload", "local-embed", "--config", str(_write_config(tmp_path))])
 
     assert exit_code == 0
-    body = json.loads(captured[0].content)
-    assert "keep_alive" not in body
-    assert "keep_alive" not in capsys.readouterr().out
+    assert len(captured) == 1
+    assert captured[0].url.path == "/api/embed"
+    assert json.loads(captured[0].content) == {
+        "model": NATIVE_EMBED,
+        "input": [],
+        "keep_alive": 0,
+    }
+    out = capsys.readouterr().out
+    assert json.loads(out)["status"] == "unloaded"
+    assert NATIVE_EMBED not in out
 
 
 def test_hosted_and_deterministic_aliases_are_refused_before_any_network(

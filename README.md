@@ -188,8 +188,10 @@ A new OpenAI-compatible vendor needs no application code: add another
 - `uv run vulcan unload <alias> --config vulcan.toml` and
   `uv run vulcan warmup <alias> --config vulcan.toml` manage Ollama residency
   by public alias: `unload` expires the model immediately (one
-  `keep_alive = 0` call), `warmup` pre-loads it (one empty generate, carrying
-  the alias's configured `keep_alive` when set). Aliases on hosted or
+  `keep_alive = 0` call), `warmup` pre-loads it (one empty load request,
+  carrying the alias's configured `keep_alive` when set). Chat aliases ride
+  `/api/generate`; embedding-only aliases ride `/api/embed`, which is the
+  endpoint their models accept. Aliases on hosted or
   deterministic providers are refused with exit 2 before any network call —
   residency management never touches a billable endpoint. Output names the
   public alias only; native model names appear solely in `ps` unmanaged rows.
