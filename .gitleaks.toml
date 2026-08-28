@@ -1,0 +1,22 @@
+# Gitleaks configuration for the Vulcan repository.
+#
+# This file exists for exactly one reason: the leak tests mandated by
+# docs/ROADMAP.md (rule 5) use sentinel credentials that deliberately match
+# the shape of real credentials so the redaction tests are meaningful.
+# The values are fixed constants in tests/test_reasoning_content.py and
+# tests/test_usage_reporter.py, are never real keys, and the allowlist below
+# matches them by exact value — everything else is scanned with the stock
+# gitleaks defaults. (Verified against a live gitleaks 8.30.1 scan: these are
+# the only two findings; the sk-ant-* sentinels do not trip any rule.)
+title = "Vulcan — gitleaks with test-sentinel allowlist"
+[extend]
+# Extend the built-in gitleaks defaults rather than a filesystem path —
+# `path` would break in CI, where no user-level gitleaks config exists.
+useDefault = true
+
+[[allowlists]]
+id = "test-sentinel-credentials"
+description = "Fixed sentinel constants for leak/redaction tests; match by exact value, not by path."
+# regexTarget=secret: match the extracted secret, not the surrounding line.
+regexTarget = "secret"
+regexes = ['''(?:sk-reasoning-secret-7d02|forge-secret-9c1f7e02)''']
