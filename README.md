@@ -1,5 +1,9 @@
 # Vulcan
 
+[![CI](https://github.com/Ayyitskevin/Vulcan/actions/workflows/ci.yml/badge.svg)](https://github.com/Ayyitskevin/Vulcan/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](pyproject.toml)
+
 Vulcan is a local-first, single-user AI gateway for explicitly configured local and
 BYOK (bring-your-own-key) models. Same-machine clients get one stable loopback API to
 discover configured model aliases and submit guarded chat requests (buffered or
@@ -11,6 +15,32 @@ model downloader, training system, credential manager, billing platform, or
 multi-user service. Every model alias is pinned to one provider; Vulcan never falls
 back to another provider, never retries upstream calls, and never fabricates a
 response.
+
+## Why Vulcan, in a field of gateways
+
+LiteLLM, OpenRouter, and friends solve a different problem: many users, many
+providers, maximal coverage, smart retries and fallbacks. Vulcan solves the
+opposite one — one operator, a handful of explicitly chosen models, and a hard
+requirement that the gateway never surprise you:
+
+- **No fallback, no retries, no routing magic.** Every alias maps to exactly one
+  provider; a failure comes back as a typed error, never as a different model's
+  answer. What you configured is what ran — which is what makes budgets and
+  trust boundaries meaningful.
+- **Fail-closed money.** Hosted BYOK aliases require a seat label and stop at
+  their daily budget with a stated reset time. There is no silent overflow and
+  no silent cloud substitution.
+- **Four runtime dependencies.** The attack surface and the upgrade surface are
+  the same small list.
+- **Leak-tested by construction.** Sentinel tests prove API keys, prompts, and
+  upstream bodies cannot appear in responses, errors, or logs — and CI scans
+  the full git history for credentials on every push.
+- **Loopback + Host allowlist is the entire auth model.** Single-user means
+  single-user; the design record owns that choice instead of hiding it.
+
+If you need multi-tenant serving, a hundred providers, or automatic failover,
+use LiteLLM — it is good at that. If you want a gateway whose entire behavior
+fits in your head, this is it.
 
 ## What Vulcan includes
 
