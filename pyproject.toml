@@ -21,6 +21,7 @@ dependencies = [
 dev = [
     "httpx2>=2.7,<3",
     "pytest>=9.1,<10",
+    "pytest-cov>=7,<8",
     "ruff>=0.15,<1",
 ]
 
@@ -41,5 +42,7 @@ select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
 "tests/**/*.py" = ["S101"]
 
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers"
+# Coverage floor pins regression, not aspiration: measured 97% (2026-08-27,
+# 690 tests); floor set 2 points below so a new uncovered line fails the gate.
+addopts = "--strict-config --strict-markers --cov=src/vulcan --cov-fail-under=95"
 testpaths = ["tests"]
