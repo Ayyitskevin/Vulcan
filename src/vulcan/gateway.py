@@ -31,6 +31,7 @@ from vulcan.providers.base import (
 )
 from vulcan.readiness import (
     READINESS_PROBE_TTL_SECONDS,
+    Availability,
     GatewayReadiness,
     RuntimeProbe,
     reconcile_configured_models,
@@ -274,6 +275,22 @@ class Gateway:
             },
         )
         return report
+
+    async def model_readiness(self, model_id: str, *, force: bool = False) -> Availability:
+        """Availability annotation for one configured model.
+
+        Probes ONLY the provider the model routes to — the metadata path
+        follows the same principle as chat preflight: unrelated providers are
+        never contacted.
+        """
+
+        model = self.registry.get(model_id)
+        probe, _ = await self._probe_provider(model.provider_id, force=force)
+        provider = self._provider_for(model.provider_id)
+        report = reconcile_configured_models(
+            (model,), {model.provider_id: probe}, {model.provider_id: provider.provider_type}
+        )
+        return report.model_availability(model_id)
 
     def invalidate_readiness(self, provider_id: str | None = None) -> None:
         """Drop cached probes so the next call re-probes.

@@ -36,10 +36,17 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]
+# Tests are assert-driven and deliberately handle hostile shapes: leak
+# sentinels that look like keys (S105), bind-address rejection cases (S104),
+# and subprocess fixtures that run the repo's own tools (S603/S607).
+"tests/**/*.py" = ["S101", "S104", "S105", "S603", "S607"]
+# Operator scripts are assert-driven harnesses that open loopback URLs and
+# spawn the very server they test; the untrusted-input surface is src/,
+# which stays fully S-clean.
+"scripts/**/*.py" = ["S101", "S310", "S603", "S607"]
 
 [tool.pytest.ini_options]
 # Coverage floor pins regression, not aspiration: measured 97% (2026-08-27,

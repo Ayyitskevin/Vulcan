@@ -450,8 +450,8 @@ def create_app(
 
         # Raise the stable model_not_found envelope for unknown public IDs.
         registry.get(model_id)
-        readiness = await gateway.readiness(force=refresh)
-        return _model_record(model_id, readiness.model_availability(model_id))
+        availability = await gateway.model_readiness(model_id, force=refresh)
+        return _model_record(model_id, availability)
 
     @app.get(
         "/v1/capabilities",

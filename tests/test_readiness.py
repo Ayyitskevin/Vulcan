@@ -972,3 +972,54 @@ def test_provider_availability_transitions_are_logged(
     assert records[0].metadata == {"provider": PROVIDER_ID, "available": False}
     assert records[1].levelname == "INFO"
     assert records[1].metadata == {"provider": PROVIDER_ID, "available": True}
+
+
+def test_model_readiness_probes_only_the_routed_provider() -> None:
+    """Single-model metadata follows the preflight principle: unrelated
+    providers are never contacted to annotate one alias."""
+
+    class RoutedProvider:
+        provider_type: Literal["ollama"] = "ollama"
+        provider_id = "provider-a"
+
+        async def discover_runtime(self) -> RuntimeProbe:
+            return RuntimeProbe(
+                live=True,
+                provider_availability="available",
+                runtime_names=frozenset({"runtime-a"}),
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    class UntouchableProvider:
+        provider_type: Literal["ollama"] = "ollama"
+        provider_id = "provider-b"
+
+        async def discover_runtime(self) -> RuntimeProbe:
+            raise AssertionError("an unrelated provider was probed for one model's metadata")
+
+        async def aclose(self) -> None:
+            return None
+
+    registry = ModelRegistry(
+        (
+            ModelConfig(
+                id="model-a",
+                provider="provider-a",
+                provider_model="runtime-a",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+            ModelConfig(
+                id="model-b",
+                provider="provider-b",
+                provider_model="runtime-b",
+                capabilities=frozenset({Capability.CHAT}),
+            ),
+        )
+    )
+    gateway = Gateway(
+        registry, {"provider-a": RoutedProvider(), "provider-b": UntouchableProvider()}
+    )
+
+    assert asyncio.run(gateway.model_readiness("model-a")) == "available"
