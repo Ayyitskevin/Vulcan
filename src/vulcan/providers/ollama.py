@@ -28,7 +28,13 @@ from vulcan.providers.base import (
     StreamDelta,
     StreamEnd,
 )
-from vulcan.providers.http import build_client
+from vulcan.providers.http import (
+    build_client,
+    iter_bounded_lines,
+    open_response,
+    read_bounded_json,
+    send_response,
+)
 from vulcan.readiness import RuntimeProbe
 
 
@@ -158,23 +164,24 @@ class OllamaProvider:
         payload = self._payload(request, stream=False)
 
         try:
-            response = await self._client.post("/api/chat", json=payload)
+            async with open_response(
+                self._client, "POST", "/api/chat", json_body=payload
+            ) as response:
+                if not response.is_success:
+                    try:
+                        error_body = await read_bounded_json(response)
+                    except ValueError:
+                        error_body = None
+                    self._raise_for_status(response.status_code, error_body)
+
+                try:
+                    parsed = _OllamaChatResponse.model_validate(await read_bounded_json(response))
+                except (ValueError, ValidationError) as exc:
+                    raise ProviderProtocolError from exc
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:
             raise ProviderUnavailableError from exc
-
-        if not response.is_success:
-            try:
-                error_body = response.json()
-            except ValueError:
-                error_body = None
-            self._raise_for_status(response.status_code, error_body)
-
-        try:
-            parsed = _OllamaChatResponse.model_validate(response.json())
-        except (ValueError, ValidationError) as exc:
-            raise ProviderProtocolError from exc
         if not parsed.done:
             raise ProviderProtocolError
 
@@ -195,12 +202,8 @@ class OllamaProvider:
         finish_reason: Literal["stop", "length"] | None = None
         usage: ProviderTokenUsage | None = None
 
-        # An explicit send/close pair (rather than the stream() context manager)
-        # keeps the upstream response closable when the consumer abandons this
-        # generator mid-stream, e.g. on client disconnect.
-        upstream = self._client.build_request("POST", "/api/chat", json=payload)
         try:
-            response = await self._client.send(upstream, stream=True)
+            response = await send_response(self._client, "POST", "/api/chat", json_body=payload)
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:
@@ -210,11 +213,11 @@ class OllamaProvider:
             if not response.is_success:
                 error_body: object = None
                 try:
-                    error_body = json.loads(await response.aread())
+                    error_body = await read_bounded_json(response)
                 except ValueError:
                     error_body = None
                 self._raise_for_status(response.status_code, error_body)
-            async for line in response.aiter_lines():
+            async for line in iter_bounded_lines(response):
                 if not line.strip():
                     continue
                 try:
@@ -249,23 +252,24 @@ class OllamaProvider:
             payload["keep_alive"] = request.keep_alive
 
         try:
-            response = await self._client.post("/api/embed", json=payload)
+            async with open_response(
+                self._client, "POST", "/api/embed", json_body=payload
+            ) as response:
+                if not response.is_success:
+                    try:
+                        error_body = await read_bounded_json(response)
+                    except ValueError:
+                        error_body = None
+                    self._raise_for_status(response.status_code, error_body)
+
+                try:
+                    parsed = _OllamaEmbedResponse.model_validate(await read_bounded_json(response))
+                except (ValueError, ValidationError) as exc:
+                    raise ProviderProtocolError from exc
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:
             raise ProviderUnavailableError from exc
-
-        if not response.is_success:
-            try:
-                error_body = response.json()
-            except ValueError:
-                error_body = None
-            self._raise_for_status(response.status_code, error_body)
-
-        try:
-            parsed = _OllamaEmbedResponse.model_validate(response.json())
-        except (ValueError, ValidationError) as exc:
-            raise ProviderProtocolError from exc
 
         usage = None
         if parsed.prompt_eval_count is not None:
@@ -291,19 +295,25 @@ class OllamaProvider:
         """
 
         try:
-            response = await self._client.get("/api/tags")
+            async with open_response(self._client, "GET", "/api/tags") as response:
+                if not response.is_success:
+                    return RuntimeProbe(
+                        live=False,
+                        provider_availability="unavailable",
+                        runtime_names=None,
+                    )
+                try:
+                    parsed = _OllamaTagsResponse.model_validate(await read_bounded_json(response))
+                except (ValueError, ValidationError, ProviderProtocolError):
+                    return RuntimeProbe(
+                        live=False,
+                        provider_availability="unchecked",
+                        runtime_names=None,
+                    )
         except httpx.TimeoutException:
             return RuntimeProbe(live=False, provider_availability="unchecked", runtime_names=None)
         except httpx.RequestError:
             return RuntimeProbe(live=False, provider_availability="unavailable", runtime_names=None)
-
-        if not response.is_success:
-            return RuntimeProbe(live=False, provider_availability="unavailable", runtime_names=None)
-
-        try:
-            parsed = _OllamaTagsResponse.model_validate(response.json())
-        except (ValueError, ValidationError):
-            return RuntimeProbe(live=False, provider_availability="unchecked", runtime_names=None)
 
         names = frozenset(model.name for model in parsed.models)
         return RuntimeProbe(live=True, provider_availability="available", runtime_names=names)

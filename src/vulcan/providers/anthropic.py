@@ -44,8 +44,11 @@ from vulcan.providers.http import (
     ANTHROPIC_VERSION,
     build_client,
     iter_sse_payloads,
+    open_response,
     raise_for_hosted_status,
+    read_bounded_json,
     resolve_api_key,
+    send_response,
 )
 from vulcan.readiness import RuntimeProbe
 
@@ -194,23 +197,25 @@ class AnthropicProvider:
         api_key = resolve_api_key(self._api_key_env)
 
         try:
-            response = await self._client.post(
+            async with open_response(
+                self._client,
+                "POST",
                 "/v1/messages",
-                json=payload,
+                json_body=payload,
                 headers={"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION},
-            )
+            ) as response:
+                if not response.is_success:
+                    raise_for_hosted_status(response.status_code)
+                try:
+                    parsed = _AnthropicMessageResponse.model_validate(
+                        await read_bounded_json(response)
+                    )
+                except (ValueError, ValidationError) as exc:
+                    raise ProviderProtocolError from exc
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:
             raise ProviderUnavailableError from exc
-
-        if not response.is_success:
-            raise_for_hosted_status(response.status_code)
-
-        try:
-            parsed = _AnthropicMessageResponse.model_validate(response.json())
-        except (ValueError, ValidationError) as exc:
-            raise ProviderProtocolError from exc
 
         # Vulcan requests no tools, so only text blocks are a valid reply;
         # silently dropping an unknown block would misreport partial content.
@@ -239,21 +244,18 @@ class AnthropicProvider:
         input_tokens: int | None = None
         output_tokens: int | None = None
 
-        # An explicit send/close pair (rather than the stream() context manager)
-        # keeps the upstream response closable when the consumer abandons this
-        # generator mid-stream, e.g. on client disconnect.
-        upstream = self._client.build_request(
-            "POST",
-            "/v1/messages",
-            json=payload,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": ANTHROPIC_VERSION,
-                "Accept": "text/event-stream",
-            },
-        )
         try:
-            response = await self._client.send(upstream, stream=True)
+            response = await send_response(
+                self._client,
+                "POST",
+                "/v1/messages",
+                json_body=payload,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": ANTHROPIC_VERSION,
+                    "Accept": "text/event-stream",
+                },
+            )
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:

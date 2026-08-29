@@ -61,7 +61,8 @@ fits in your head, this is it.
   `vulcan check` command that reports credential availability without revealing
   values.
 - Loopback-only server binding, HTTP `Host` validation, and hardened upstream HTTP
-  clients (finite timeouts, no redirects, no proxy inheritance).
+  clients (finite timeouts, a 16 MiB decoded-response ceiling, no redirects, no
+  proxy inheritance).
 
 Model discovery remains configuration-owned: Vulcan never invents public IDs from a
 runtime inventory. Ollama providers are probed via `/api/tags` and each configured
@@ -342,6 +343,13 @@ data: {"error":{"code":"provider_protocol_error","message":"The selected provide
 
 Clients that disconnect mid-stream cancel the upstream request; Vulcan closes the
 provider response rather than draining it.
+
+Every upstream body a serving adapter reads is consumed incrementally and capped
+at 16 MiB after HTTP content decoding. The same total ceiling covers buffered
+JSON, SSE, Ollama NDJSON, readiness inventory, and local error bodies; hosted
+status-only responses are closed without reading their bodies. Crossing the
+ceiling is a non-retryable `502 provider_protocol_error`; Vulcan closes the
+response and never forwards its body.
 
 ### Vendor extension fields (including reasoning content)
 

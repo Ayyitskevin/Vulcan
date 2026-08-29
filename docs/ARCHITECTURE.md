@@ -144,7 +144,10 @@ Key rules:
 - Every HTTP client is built by one hardened helper: finite configured
   timeout, `follow_redirects=False`, `trust_env=False` (no proxy/CA
   inheritance), fixed `User-Agent`/`Accept` headers, and clean shutdown on
-  application exit.
+  application exit. Every response is opened with HTTPX streaming semantics
+  before any body bytes are read, then capped at 16 MiB of decoded data. The
+  bound covers buffered JSON, SSE, Ollama NDJSON, readiness inventory, and
+  local error bodies; status-only credential checks never read the body.
 - **No external telemetry, no analytics, no automatic provider or model
   discovery.** Vulcan calls exactly two kinds of upstream endpoints: the chat
   endpoint for a request the client made, and Ollama's local `/api/tags` for
@@ -198,11 +201,15 @@ policy, and still issues exactly one upstream call per request.
   emitted as one terminal SSE frame containing the same normalized error body
   (plus `request_id`) and the stream closes without `[DONE]`. Upstream bodies
   are never forwarded in either case.
-- **Cancellation.** Adapters send with `stream=True` and close the response in
-  a `finally`, rather than using httpx's `stream()` context manager: closing an
-  async generator suspended inside that context manager violates contextlib's
-  athrow protocol, whereas an explicit close releases the upstream connection
-  cleanly when a client disconnects mid-stream.
+- **Cancellation.** Adapters open responses through the shared `send_response`
+  helper with `stream=True` and close the response in a `finally`, rather than
+  placing an async context manager inside the provider generator. An abandoned
+  client stream therefore releases the upstream connection without draining it.
+- **Finite upstream data.** Buffered and streaming paths share one 16 MiB
+  decoded-response ceiling. SSE and NDJSON are split incrementally with UTF-8
+  LF, CRLF, or CR framing instead of relying on an unbounded line accumulator.
+  A response that crosses the ceiling or contains invalid UTF-8 is closed and
+  maps to `provider_protocol_error`; no retry or fallback is attempted.
 - **Translation.** OpenAI-compatible: SSE `data:` frames, `delta.content`
   accumulated, `[DONE]` ends the stream, usage taken from whichever chunk
   provides it (`stream_options.include_usage` is deliberately not sent — vendor
@@ -320,7 +327,7 @@ for classification but never surfaced. Additions in v2:
 | `provider_unavailable` | 503 | yes | Connection failure, or upstream 503/529. |
 | `provider_timeout` | 504 | yes | The finite configured timeout expired. |
 | `model_unavailable` | 503 | no | Upstream 404 (unknown native model), or a live Ollama list proved absence. |
-| `provider_protocol_error` | 502 | no | Malformed/incomplete upstream payload. |
+| `provider_protocol_error` | 502 | no | Malformed, incomplete, invalid-UTF-8, or over-16-MiB upstream payload. |
 | `provider_error` | 502 | varies | Any other upstream non-success (5xx and 408 retryable, other 4xx not). |
 
 Provider-side errors carry `details.provider` (the safe configured ID) so a
