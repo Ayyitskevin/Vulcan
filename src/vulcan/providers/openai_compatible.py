@@ -257,6 +257,9 @@ class OpenAICompatibleProvider:
                         finish_reason = _finish_reason(choice.finish_reason)
                     if choice.delta is not None and choice.delta.content:
                         yield StreamDelta(text=choice.delta.content)
+            else:
+                # The endpoint closed without [DONE]: truncated reply.
+                raise ProviderProtocolError
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:

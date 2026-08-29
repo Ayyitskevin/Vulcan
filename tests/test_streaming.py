@@ -230,6 +230,20 @@ def test_compat_stream_malformed_frames_are_protocol_errors(body: bytes) -> None
         _collect(_compat_provider(handler))
 
 
+def test_compat_stream_truncated_without_done_is_a_protocol_error() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse(json.dumps({"choices": [{"delta": {"content": "cut"}}]})),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    # A stream that ends without [DONE] is truncated; the adapter must refuse
+    # it rather than report a clean StreamEnd (base.py's contract).
+    with pytest.raises(ProviderProtocolError):
+        _collect(_compat_provider(handler))
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
@@ -442,18 +456,10 @@ def test_anthropic_stream_truncated_without_message_stop_is_a_protocol_error() -
             headers={"content-type": "text/event-stream"},
         )
 
-    provider = _anthropic_provider(handler)
-
-    async def run() -> list[ProviderStreamEvent]:
-        try:
-            return [event async for event in provider.chat_stream(_request())]
-        finally:
-            await provider.aclose()
-
-    # A stream that ends without message_stop still terminates cleanly here;
-    # the gateway is what turns a missing terminal event into a protocol error.
-    events = asyncio.run(run())
-    assert events[-1] == StreamEnd(finish_reason=None, usage=None)
+    # A stream that ends without message_stop is truncated; the adapter must
+    # refuse it rather than report a clean StreamEnd (base.py's contract).
+    with pytest.raises(ProviderProtocolError):
+        _collect(_anthropic_provider(handler))
 
 
 def test_anthropic_stream_local_guards_run_before_any_io() -> None:

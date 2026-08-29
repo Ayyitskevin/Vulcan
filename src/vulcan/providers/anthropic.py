@@ -301,6 +301,9 @@ class AnthropicProvider:
                         output_tokens = event.usage.output_tokens
                 elif event.type == "message_stop":
                     break
+            else:
+                # The API closed without message_stop: truncated reply.
+                raise ProviderProtocolError
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:

@@ -434,14 +434,14 @@ def _labeled_stream(client: TestClient) -> str:
     return response.read().decode()
 
 
-def test_seat_records_when_upstream_omits_the_done_terminator(
+def test_seat_never_escapes_when_upstream_omits_the_done_terminator(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """EOF without [DONE] is tolerated upstream, so the request completes.
+    """EOF without [DONE] is a truncated stream, not a completed request.
 
-    The adapter yields a normal StreamEnd at upstream EOF (finish_reason
-    None); the gateway records it as a completed request with no reported
-    tokens. The seat rides along into by_seat and escapes nowhere.
+    The adapter raises ProviderProtocolError (same as ollama without a done
+    chunk and anthropic without message_stop); the gateway records no usage,
+    and the seat appears in neither the partial bytes nor the logs.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -457,16 +457,19 @@ def test_seat_records_when_upstream_omits_the_done_terminator(
         caplog.at_level(logging.INFO, logger="vulcan.gateway"),
         _streaming_client(handler, captured) as client,
     ):
-        streamed = _labeled_stream(client)
+        streamed = ""
+        # The mid-body failure may surface as a transport-level error; the
+        # sentinels below still apply to whatever was produced before it died.
+        with contextlib.suppress(Exception):
+            streamed = _labeled_stream(client)
         usage_body = client.get("/v1/usage").json()
 
     assert SEAT_SENTINEL not in captured[0].content.decode()
     assert SEAT_SENTINEL not in streamed
-    assert "chat_completed" in caplog.text
-    assert SEAT_SENTINEL not in caplog.text
-    seats = {item["seat"]: item["totals"] for item in usage_body["by_seat"]}
-    assert seats[SEAT_SENTINEL]["requests"] == 1
-    assert seats[SEAT_SENTINEL]["requests_with_usage"] == 0
+    assert caplog.text != ""  # the failure produced log records...
+    assert SEAT_SENTINEL not in caplog.text  # ...none of which carry the seat
+    # A truncated stream is not usage, so the seat records nothing.
+    assert usage_body["by_seat"] == []
 
 
 def test_seat_never_escapes_on_mid_stream_protocol_failure(
