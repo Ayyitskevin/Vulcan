@@ -921,3 +921,54 @@ def test_model_unavailable_invalidates_only_that_providers_probe() -> None:
     asyncio.run(gateway.readiness())
     assert failing.discover_calls == 2
     assert healthy.discover_calls == 1
+
+
+def test_provider_availability_transitions_are_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dead backend never fails healthz by design — so the flip must be named.
+
+    The first probe sets the baseline silently; only live→dead and dead→live
+    transitions emit provider_availability_changed, once per flip.
+    """
+
+    import logging
+
+    class FlippableProvider:
+        provider_type: Literal["ollama"] = "ollama"
+        provider_id = PROVIDER_ID
+
+        def __init__(self) -> None:
+            self.live = True
+
+        async def discover_runtime(self) -> RuntimeProbe:
+            return RuntimeProbe(
+                live=self.live,
+                provider_availability="available" if self.live else "unavailable",
+                runtime_names=frozenset({"runtime-chat"}) if self.live else None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    provider = FlippableProvider()
+    # TTL 0: every readiness() call re-probes, so transitions are observed.
+    gateway = Gateway(_single_model_registry(), {PROVIDER_ID: provider}, readiness_ttl_seconds=0)
+
+    with caplog.at_level(logging.INFO, logger="vulcan.gateway"):
+        asyncio.run(gateway.readiness())  # baseline: silent
+        assert "provider_availability_changed" not in caplog.text
+
+        provider.live = False
+        asyncio.run(gateway.readiness())  # the 3am Ollama death
+        assert caplog.text.count("provider_availability_changed") == 1
+
+        provider.live = True
+        asyncio.run(gateway.readiness())  # recovery is named too
+        assert caplog.text.count("provider_availability_changed") == 2
+
+    records = [record for record in caplog.records if record.msg == "provider_availability_changed"]
+    assert records[0].levelname == "WARNING"
+    assert records[0].metadata == {"provider": PROVIDER_ID, "available": False}
+    assert records[1].levelname == "INFO"
+    assert records[1].metadata == {"provider": PROVIDER_ID, "available": True}

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
@@ -65,6 +66,49 @@ class _CachedProbe:
     expires_at: float
 
 
+@dataclass(slots=True)
+class _RequestScope:
+    """Routing state for one admitted request; settles budget + meter once.
+
+    Created by ``Gateway._lifecycle``. The only mutation is ``commit()``,
+    which the entry points call the moment the upstream has completed — for
+    a stream, BEFORE the terminal chunk is yielded, so a consumer that
+    disconnects at the final yield cannot evade the meter or the budget.
+    """
+
+    _gateway: Gateway
+    model: ConfiguredModel
+    provider: Provider
+    reservation: int | None
+    seat: str | None
+    settled: bool = False
+
+    def commit(
+        self,
+        *,
+        prompt_tokens: int | None,
+        completion_tokens: int | None = None,
+        settle_tokens: int | None,
+    ) -> None:
+        """Record the meter and settle the budget reservation exactly once."""
+
+        self._gateway._usage.record(
+            model=self.model.id,
+            provider=self.provider.provider_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            seat=self.seat,
+        )
+        if self._gateway._budgets is not None and self.reservation is not None:
+            self._gateway._budgets.settle(
+                seat=self.seat,
+                provider_id=self.provider.provider_id,
+                tokens=settle_tokens,
+                reservation_day=self.reservation,
+            )
+        self.settled = True
+
+
 class Gateway:
     def __init__(
         self,
@@ -91,6 +135,7 @@ class Gateway:
         self._readiness_ttl_seconds = readiness_ttl_seconds
         self._cached_probes: dict[str, _CachedProbe] = {}
         self._probe_locks: dict[str, asyncio.Lock] = {}
+        self._last_live: dict[str, bool] = {}
         self._usage = usage if usage is not None else UsageRecorder()
         self._budgets = budgets
         self._concurrency = (
@@ -160,6 +205,18 @@ class Gateway:
                 if probe is not None:
                     return probe, True
             probe = await self._provider_for(provider_id).discover_runtime()
+            # Name availability transitions: healthz never fails on a dead
+            # backend (by design), so without this a provider dying at 3am is
+            # invisible unless someone is polling and diffing. The first probe
+            # sets the baseline silently; only flips are logged.
+            previous = self._last_live.get(provider_id)
+            if previous is not None and previous != probe.live:
+                transition_log = logger.info if probe.live else logger.warning
+                transition_log(
+                    "provider_availability_changed",
+                    extra={"metadata": {"provider": provider_id, "available": probe.live}},
+                )
+            self._last_live[provider_id] = probe.live
             self._cached_probes[provider_id] = _CachedProbe(
                 probe=probe,
                 expires_at=self._clock() + self._readiness_ttl_seconds,
@@ -243,6 +300,63 @@ class Gateway:
             return False
         return not runtime_name_matches(provider_model, probe.runtime_names)
 
+    @asynccontextmanager
+    async def _lifecycle(
+        self,
+        *,
+        capability: Capability,
+        model_id: str,
+        seat: str | None,
+        metadata: dict[str, object],
+        failure_event: str,
+    ) -> AsyncIterator[_RequestScope]:
+        """Admit, route, and reserve for one request; release on any exit.
+
+        The chat, stream, and embeddings entry points share this scaffold so
+        the settle/release discipline lives in exactly one place: overload and
+        over-budget requests are refused loudly before any upstream call, an
+        unsettled reservation is always returned (VulcanError, CancelledError,
+        and client disconnect alike), and the in-flight slot always goes back.
+        """
+
+        provider: Provider | None = None
+        reservation: int | None = None
+        scope: _RequestScope | None = None
+        admitted = await self._admit()
+        try:
+            try:
+                if not admitted:
+                    # Hard reject, not a queue: the caller owns any retry.
+                    raise GatewayOverloadedError
+                model = self.registry.require_capability(model_id, capability)
+                provider = self._provider_for(model.provider_id)
+                metadata["provider"] = provider.provider_id
+                metadata["provider_type"] = provider.provider_type
+                if self._budgets is not None:
+                    # Budgets gate BEFORE the upstream call: over-budget
+                    # requests are refused loudly, never rerouted. check()
+                    # atomically reserves the request slot when it passes.
+                    reservation = self._budgets.check(seat=seat, provider_id=provider.provider_id)
+                scope = _RequestScope(self, model, provider, reservation, seat)
+                yield scope
+            except VulcanError as exc:
+                self._handle_failure(exc, provider, metadata, event=failure_event)
+                raise
+        finally:
+            if (
+                reservation is not None
+                and (scope is None or not scope.settled)
+                and provider is not None
+                and self._budgets is not None
+            ):
+                self._budgets.release(
+                    seat=seat,
+                    provider_id=provider.provider_id,
+                    reservation_day=reservation,
+                )
+            if admitted:
+                self._release_admission()
+
     async def chat(
         self,
         request: ChatCompletionRequest,
@@ -257,32 +371,20 @@ class Gateway:
         }
         if request_id is not None:
             metadata["request_id"] = request_id
-        provider: Provider | None = None
-        reservation: int | None = None
-        settled = False
-        admitted = await self._admit()
-        try:
-            try:
-                if not admitted:
-                    # Hard reject, not a queue: the caller owns any retry.
-                    raise GatewayOverloadedError
-                if request.stream:
-                    # Streaming belongs on chat_stream; the HTTP layer routes
-                    # it there. Reaching here would silently buffer a stream.
-                    raise UnsupportedCapabilityError("streaming", request.model)
-                model, provider = self._select_provider(request, metadata)
-                if self._budgets is not None:
-                    # Budgets gate BEFORE the upstream call: over-budget
-                    # requests are refused loudly, never rerouted. check()
-                    # atomically reserves the request slot when it passes.
-                    reservation = self._budgets.check(
-                        seat=request.seat, provider_id=provider.provider_id
-                    )
-                provider_request = await self._preflight(model, request)
-                result = await provider.chat(provider_request)
-            except VulcanError as exc:
-                self._handle_chat_failure(exc, provider, metadata)
-                raise
+        if request.stream:
+            # Streaming belongs on chat_stream; the HTTP layer routes it
+            # there. Guard before any model lookup: reaching here would
+            # otherwise silently buffer a stream.
+            raise UnsupportedCapabilityError("streaming", request.model)
+        async with self._lifecycle(
+            capability=Capability.CHAT,
+            model_id=request.model,
+            seat=request.seat,
+            metadata=metadata,
+            failure_event="chat_failed",
+        ) as scope:
+            provider_request = await self._preflight(scope.model, request)
+            result = await scope.provider.chat(provider_request)
 
             usage = None
             if result.usage is not None:
@@ -291,21 +393,11 @@ class Gateway:
                     completion_tokens=result.usage.completion_tokens,
                     total_tokens=result.usage.prompt_tokens + result.usage.completion_tokens,
                 )
-            self._usage.record(
-                model=request.model,
-                provider=provider.provider_id,
+            scope.commit(
                 prompt_tokens=usage.prompt_tokens if usage is not None else None,
                 completion_tokens=usage.completion_tokens if usage is not None else None,
-                seat=request.seat,
+                settle_tokens=usage.total_tokens if usage is not None else None,
             )
-            if self._budgets is not None and reservation is not None:
-                self._budgets.settle(
-                    seat=request.seat,
-                    provider_id=provider.provider_id,
-                    tokens=usage.total_tokens if usage is not None else None,
-                    reservation_day=reservation,
-                )
-            settled = True
             logger.info(
                 "chat_completed",
                 extra={"metadata": {**metadata, "output_chars": len(result.content)}},
@@ -314,7 +406,7 @@ class Gateway:
                 id=self._id_factory(),
                 created=int(self._clock()),
                 model=request.model,
-                provider=provider.provider_id,
+                provider=scope.provider.provider_id,
                 choices=(
                     ChatChoice(
                         message=AssistantMessage(content=result.content),
@@ -323,36 +415,6 @@ class Gateway:
                 ),
                 usage=usage,
             )
-        finally:
-            # Covers VulcanError, CancelledError, and client disconnects
-            # alike: an unsettled reservation is always returned, and the
-            # in-flight slot always goes back.
-            if (
-                reservation is not None
-                and not settled
-                and provider is not None
-                and self._budgets is not None
-            ):
-                self._budgets.release(
-                    seat=request.seat,
-                    provider_id=provider.provider_id,
-                    reservation_day=reservation,
-                )
-            if admitted:
-                self._release_admission()
-
-    def _select_provider(
-        self,
-        request: ChatCompletionRequest,
-        metadata: dict[str, object],
-    ) -> tuple[ConfiguredModel, Provider]:
-        """Resolve the alias to exactly one configured provider; never a fallback."""
-
-        model = self.registry.require_capability(request.model, Capability.CHAT)
-        provider = self._provider_for(model.provider_id)
-        metadata["provider"] = provider.provider_id
-        metadata["provider_type"] = provider.provider_type
-        return model, provider
 
     async def _assert_model_available(self, model: ConfiguredModel) -> None:
         """Probe ONLY the routed provider before spending an upstream call.
@@ -402,14 +464,6 @@ class Gateway:
         self._annotate_provider(exc, provider)
         logger.warning(event, extra={"metadata": {**metadata, "error_code": exc.code}})
 
-    def _handle_chat_failure(
-        self,
-        exc: VulcanError,
-        provider: Provider | None,
-        metadata: dict[str, object],
-    ) -> None:
-        self._handle_failure(exc, provider, metadata, event="chat_failed")
-
     @staticmethod
     async def _next_event(
         events: AsyncIterator[ProviderStreamEvent],
@@ -443,32 +497,19 @@ class Gateway:
         if request_id is not None:
             metadata["request_id"] = request_id
 
-        provider: Provider | None = None
-        reservation: int | None = None
-        settled = False
-        admitted = await self._admit()
-        try:
-            try:
-                if not admitted:
-                    # Hard reject, not a queue: the caller owns any retry.
-                    raise GatewayOverloadedError
-                model, provider = self._select_provider(request, metadata)
-                if self._budgets is not None:
-                    # Budgets gate BEFORE the upstream call: over-budget
-                    # requests are refused loudly, never rerouted. check()
-                    # atomically reserves the request slot when it passes.
-                    reservation = self._budgets.check(
-                        seat=request.seat, provider_id=provider.provider_id
-                    )
-                provider_request = await self._preflight(model, request)
-                events = provider.chat_stream(provider_request).__aiter__()
-                # Opening the upstream stream (and classifying its status)
-                # happens on this first pull, while a JSON error envelope is
-                # still possible.
-                event = await self._next_event(events)
-            except VulcanError as exc:
-                self._handle_chat_failure(exc, provider, metadata)
-                raise
+        async with self._lifecycle(
+            capability=Capability.CHAT,
+            model_id=request.model,
+            seat=request.seat,
+            metadata=metadata,
+            failure_event="chat_failed",
+        ) as scope:
+            provider_request = await self._preflight(scope.model, request)
+            events = scope.provider.chat_stream(provider_request).__aiter__()
+            # Opening the upstream stream (and classifying its status)
+            # happens on this first pull, while a JSON error envelope is
+            # still possible.
+            event = await self._next_event(events)
 
             completion_id = self._id_factory()
             created = int(self._clock())
@@ -483,7 +524,7 @@ class Gateway:
                     id=completion_id,
                     created=created,
                     model=request.model,
-                    provider=provider.provider_id,
+                    provider=scope.provider.provider_id,
                     choices=(ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),),
                     usage=usage,
                 )
@@ -512,25 +553,15 @@ class Gateway:
                     # BEFORE yielding the terminal chunk, so a consumer that
                     # disconnects at the final yield cannot evade either —
                     # repeated final-chunk abandonment must never be free.
-                    self._usage.record(
-                        model=request.model,
-                        provider=provider.provider_id,
+                    scope.commit(
                         prompt_tokens=final_usage.prompt_tokens
                         if final_usage is not None
                         else None,
                         completion_tokens=final_usage.completion_tokens
                         if final_usage is not None
                         else None,
-                        seat=request.seat,
+                        settle_tokens=final_usage.total_tokens if final_usage is not None else None,
                     )
-                    if self._budgets is not None and reservation is not None:
-                        self._budgets.settle(
-                            seat=request.seat,
-                            provider_id=provider.provider_id,
-                            tokens=final_usage.total_tokens if final_usage is not None else None,
-                            reservation_day=reservation,
-                        )
-                    settled = True
                     logger.info(
                         "chat_completed",
                         extra={"metadata": {**metadata, "output_chars": output_chars}},
@@ -541,32 +572,12 @@ class Gateway:
                 if not completed:
                     # The upstream closed without a terminal event: truncated reply.
                     raise ProviderProtocolError
-            except VulcanError as exc:
-                self._handle_chat_failure(exc, provider, metadata)
-                raise
             finally:
                 # Releases the upstream response on normal completion, on error,
                 # and when the client disconnects mid-stream.
                 aclose = getattr(events, "aclose", None)
                 if aclose is not None:
                     await aclose()
-        finally:
-            # Covers VulcanError, CancelledError, and generator aclose() at
-            # ANY yield point: an unsettled reservation is always returned,
-            # and the in-flight slot always goes back.
-            if (
-                reservation is not None
-                and not settled
-                and provider is not None
-                and self._budgets is not None
-            ):
-                self._budgets.release(
-                    seat=request.seat,
-                    provider_id=provider.provider_id,
-                    reservation_day=reservation,
-                )
-            if admitted:
-                self._release_admission()
 
     async def embed(
         self,
@@ -584,39 +595,24 @@ class Gateway:
         }
         if request_id is not None:
             metadata["request_id"] = request_id
-        provider: Provider | None = None
-        reservation: int | None = None
-        settled = False
-        admitted = await self._admit()
-        try:
-            try:
-                if not admitted:
-                    # Hard reject, not a queue: the caller owns any retry.
-                    raise GatewayOverloadedError
-                model = self.registry.require_capability(request.model, Capability.EMBEDDINGS)
-                provider = self._provider_for(model.provider_id)
-                metadata["provider"] = provider.provider_id
-                metadata["provider_type"] = provider.provider_type
-                if self._budgets is not None:
-                    # Same gate as chat: refused loudly before the upstream
-                    # call. check() atomically reserves the request slot.
-                    reservation = self._budgets.check(
-                        seat=request.seat, provider_id=provider.provider_id
-                    )
-                await self._assert_model_available(model)
-                result = await provider.embed(
-                    ProviderEmbeddingRequest(
-                        provider_model=model.provider_model,
-                        inputs=inputs,
-                        keep_alive=model.keep_alive,
-                    )
+        async with self._lifecycle(
+            capability=Capability.EMBEDDINGS,
+            model_id=request.model,
+            seat=request.seat,
+            metadata=metadata,
+            failure_event="embeddings_failed",
+        ) as scope:
+            await self._assert_model_available(scope.model)
+            result = await scope.provider.embed(
+                ProviderEmbeddingRequest(
+                    provider_model=scope.model.provider_model,
+                    inputs=inputs,
+                    keep_alive=scope.model.keep_alive,
                 )
-                if len(result.vectors) != len(inputs):
-                    # A vector per input, or the client cannot align them.
-                    raise ProviderProtocolError
-            except VulcanError as exc:
-                self._handle_failure(exc, provider, metadata, event="embeddings_failed")
-                raise
+            )
+            if len(result.vectors) != len(inputs):
+                # A vector per input, or the client cannot align them.
+                raise ProviderProtocolError
 
             usage = None
             if result.usage is not None:
@@ -624,20 +620,10 @@ class Gateway:
                     prompt_tokens=result.usage.prompt_tokens,
                     total_tokens=result.usage.total_tokens,
                 )
-            self._usage.record(
-                model=request.model,
-                provider=provider.provider_id,
+            scope.commit(
                 prompt_tokens=usage.prompt_tokens if usage is not None else None,
-                seat=request.seat,
+                settle_tokens=usage.total_tokens if usage is not None else None,
             )
-            if self._budgets is not None and reservation is not None:
-                self._budgets.settle(
-                    seat=request.seat,
-                    provider_id=provider.provider_id,
-                    tokens=usage.total_tokens if usage is not None else None,
-                    reservation_day=reservation,
-                )
-            settled = True
             logger.info(
                 "embeddings_completed",
                 extra={
@@ -650,30 +636,13 @@ class Gateway:
             )
             return EmbeddingsResponse(
                 model=request.model,
-                provider=provider.provider_id,
+                provider=scope.provider.provider_id,
                 data=tuple(
                     EmbeddingRecord(index=index, embedding=vector)
                     for index, vector in enumerate(result.vectors)
                 ),
                 usage=usage,
             )
-        finally:
-            # Covers VulcanError, CancelledError, and client disconnects
-            # alike: an unsettled reservation is always returned, and the
-            # in-flight slot always goes back.
-            if (
-                reservation is not None
-                and not settled
-                and provider is not None
-                and self._budgets is not None
-            ):
-                self._budgets.release(
-                    seat=request.seat,
-                    provider_id=provider.provider_id,
-                    reservation_day=reservation,
-                )
-            if admitted:
-                self._release_admission()
 
     def usage_snapshot(self) -> UsageSnapshot:
         """Process-lifetime counters for completed requests."""
