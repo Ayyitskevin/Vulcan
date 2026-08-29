@@ -43,6 +43,7 @@ not a bug. In particular, these are **not** findings:
 
 In scope, for example: prompt or upstream-body text leaking into responses,
 errors, or logs; a request path that can select or construct an upstream URL;
+a provider response that can grow without a finite decoded-byte bound;
 a failure that violates the no-retry, no-fallback contract in a way that can
 double-charge; a path that bypasses budgets or the in-flight bound; a startup
 path that accepts invalid configuration and fails unsafely.

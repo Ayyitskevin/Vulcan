@@ -36,8 +36,11 @@ from vulcan.providers.base import (
 from vulcan.providers.http import (
     build_client,
     iter_sse_payloads,
+    open_response,
     raise_for_hosted_status,
+    read_bounded_json,
     resolve_api_key,
+    send_response,
 )
 from vulcan.readiness import RuntimeProbe
 
@@ -180,23 +183,23 @@ class OpenAICompatibleProvider:
         payload = self._payload(request, stream=False)
 
         try:
-            response = await self._client.post(
+            async with open_response(
+                self._client,
+                "POST",
                 "/chat/completions",
-                json=payload,
+                json_body=payload,
                 headers={"Authorization": f"Bearer {api_key}"},
-            )
+            ) as response:
+                if not response.is_success:
+                    raise_for_hosted_status(response.status_code)
+                try:
+                    parsed = _CompatChatResponse.model_validate(await read_bounded_json(response))
+                except (ValueError, ValidationError) as exc:
+                    raise ProviderProtocolError from exc
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:
             raise ProviderUnavailableError from exc
-
-        if not response.is_success:
-            raise_for_hosted_status(response.status_code)
-
-        try:
-            parsed = _CompatChatResponse.model_validate(response.json())
-        except (ValueError, ValidationError) as exc:
-            raise ProviderProtocolError from exc
 
         choice = parsed.choices[0]
         return ProviderChatResult(
@@ -218,17 +221,17 @@ class OpenAICompatibleProvider:
         finish_reason: Literal["stop", "length"] | None = None
         usage: ProviderTokenUsage | None = None
 
-        # An explicit send/close pair (rather than the stream() context manager)
-        # keeps the upstream response closable when the consumer abandons this
-        # generator mid-stream, e.g. on client disconnect.
-        upstream = self._client.build_request(
-            "POST",
-            "/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"},
-        )
         try:
-            response = await self._client.send(upstream, stream=True)
+            response = await send_response(
+                self._client,
+                "POST",
+                "/chat/completions",
+                json_body=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "text/event-stream",
+                },
+            )
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:
@@ -271,23 +274,25 @@ class OpenAICompatibleProvider:
         }
 
         try:
-            response = await self._client.post(
+            async with open_response(
+                self._client,
+                "POST",
                 "/embeddings",
-                json=payload,
+                json_body=payload,
                 headers={"Authorization": f"Bearer {api_key}"},
-            )
+            ) as response:
+                if not response.is_success:
+                    raise_for_hosted_status(response.status_code)
+                try:
+                    parsed = _CompatEmbeddingsResponse.model_validate(
+                        await read_bounded_json(response)
+                    )
+                except (ValueError, ValidationError) as exc:
+                    raise ProviderProtocolError from exc
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError from exc
         except httpx.RequestError as exc:
             raise ProviderUnavailableError from exc
-
-        if not response.is_success:
-            raise_for_hosted_status(response.status_code)
-
-        try:
-            parsed = _CompatEmbeddingsResponse.model_validate(response.json())
-        except (ValueError, ValidationError) as exc:
-            raise ProviderProtocolError from exc
 
         # Vendors may return records out of order; `index` is authoritative when
         # present, and must form exactly 0..n-1 so no input is silently dropped.
