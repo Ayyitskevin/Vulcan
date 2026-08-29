@@ -149,9 +149,17 @@ Key rules:
   bound covers buffered JSON, SSE, Ollama NDJSON, readiness inventory, and
   local error bodies; status-only credential checks never read the body.
 - **No external telemetry, no analytics, no automatic provider or model
-  discovery.** Vulcan calls exactly two kinds of upstream endpoints: the chat
-  endpoint for a request the client made, and Ollama's local `/api/tags` for
-  readiness.
+  discovery.** Vulcan calls upstream endpoints only for these purposes:
+  the chat endpoint for a request the client made (`/api/chat`,
+  `/v1/messages`, or `{base_url}/chat/completions`), the embeddings
+  endpoint for a request the client made (`/api/embed` or
+  `{base_url}/embeddings`), and Ollama's local `/api/tags` for readiness.
+  Explicit operator CLI actions add three more, each opt-in and never
+  automatic: `vulcan ps` reads `/api/ps`; `vulcan warmup` and
+  `vulcan unload` each send one load request to `/api/generate` (chat
+  aliases) or `/api/embed` (embedding aliases); and
+  `vulcan check --verify-credentials` makes one status-only
+  `GET {base_url}/models` (anthropic: `/v1/models`) per hosted provider.
 
 ## Routing and runtime semantics
 
@@ -265,10 +273,11 @@ optional `seat` label) the caller.
   counts contribute a request and zero tokens, so token totals are only
   interpretable against that counter. Embeddings contribute prompt tokens only
   (there are no completion tokens).
-- **Process-scoped, never persisted.** Counters reset on restart, carry no
-  costs or currencies, and are exposed only over the loopback API. Aliases and
-  provider IDs are already public metadata; no prompt, native model name, or
-  credential is involved.
+- **Process-scoped and never persisted by default.** Counters reset on
+  restart unless the operator opts into the durable ledger (below); they
+  carry no costs or currencies and are exposed only over the loopback API.
+  Aliases and provider IDs are already public metadata; no prompt, native
+  model name, or credential is involved.
 - **No locking needed.** Increments happen on one event loop with no await
   between read and write.
 - **The durable ledger is opt-in and honest (operator-requested 2026-08).**
@@ -403,7 +412,8 @@ explicitly. The README carries the operator-facing step-by-step guide.
 - Tools, images, agents, and any UI.
 - Retries/backoff (risk of duplicate charges), circuit breakers, fallback
   chains, load balancing, and “best model” selection.
-- Cost or price computation, quotas, and persisted usage history.
+- Cost or price computation — the shipped budgets are request/token caps
+  against the local ledger, not billing or money.
 - Hosted-provider readiness probing (billable), model catalogue discovery,
   and credential storage of any kind.
 - Per-vendor adapters or vendor-specific request extensions (e.g. DeepSeek

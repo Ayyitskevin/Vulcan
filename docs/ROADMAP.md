@@ -12,8 +12,13 @@ Read order before any work: `README.md` → `docs/ARCHITECTURE.md` → this file
 
 ## 1. How to work this plan (agent operating instructions)
 
-0. **Next phase: operator-directed work or the §8 standing item.** Phases
-   1–4 and the Road-to-1.0 gates (§9) are complete and merged.
+0. **Current state: every phase through 1.0.0 is complete** (§5–§9, §11).
+   The only pending items are the two trigger-gated ones at the end of
+   §11 — `GET /metrics` (when an actual scraper exists on mickey) and
+   automatic ledger boot-time size-cap rotation (when the ledger reaches
+   tens of MB; the operator-run `vulcan ledger-truncate` CLI already
+   shipped for manual compaction). Anything else is new
+   operator-directed work, not a queued phase.
 1. **One phase per pull request.** Complete phases strictly in order. Do not
    start phase N+1 in the same PR as phase N. Small preparatory refactors
    belong in the phase PR that needs them.
@@ -91,7 +96,7 @@ predictability, safety, and honesty, not feature breadth.
 | Safe JSON logging + redaction | `src/vulcan/observability.py` |
 | CLI `serve` + `check` (credential presence without values) | `src/vulcan/cli.py` |
 | Real-process smoke test (all five endpoints) | `scripts/smoke.py` |
-| 628 tests, all upstream traffic mocked | `tests/` |
+| The pytest suite, all upstream traffic mocked | `tests/` |
 
 ---
 
@@ -292,7 +297,8 @@ Do these only when a session has no higher phase pending, one PR per item:
 - ~~**CI matrix**~~ — ✅ DONE (2026-07). `quality` runs on 3.12 and 3.13 with
   `fail-fast: false`; `UV_PYTHON` pins each leg to its matrix interpreter so a
   job cannot silently test the wrong one. Verified on a real 3.13 before the
-  matrix was added — lock resolves, ruff and 519 tests pass, smoke green.
+  matrix was added — lock resolves, ruff and the full pytest suite pass,
+  smoke green.
   Add the next version the same way: prove the gate locally first, then widen
   the matrix.
 - Keep the suite fast (< ~10s); parallelize only if it grows past that.

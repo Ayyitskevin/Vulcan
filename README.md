@@ -78,7 +78,8 @@ The design record for the multi-provider architecture is in
 
 ## Local setup
 
-Vulcan requires Python 3.12 or 3.13 and [uv](https://docs.astral.sh/uv/). No model
+Vulcan requires Python 3.12 or newer (CI-verified on 3.12 and 3.13) and
+[uv](https://docs.astral.sh/uv/). No model
 runtime is installed or downloaded by these commands.
 
 ```bash
@@ -100,7 +101,14 @@ loopback, and IPv6 loopback are allowed.
 For a supervised, boot-persistent install (recommended once Vulcan is part of
 your daily tooling), `deploy/` ships a reference systemd unit and the deploy
 convention it assumes — code checkout and state directory kept separate,
-restart-on-failure, structured logs to the journal. See
+restart-on-failure, structured logs to the journal. The unit runs
+`Type=notify` with `WatchdogSec=30` against the app's built-in sd_notify
+heartbeat (`src/vulcan/notify.py`), so a wedged-but-alive process stops
+beating and systemd kills and restarts it. `deploy/update.sh` is the update
+flow made mechanical (fast-forward pull, `vulcan check` before the restart).
+`deploy/vulcan-usage-reporter.service` + `.timer` run
+`scripts/usage_reporter.py` daily, posting a content-safe usage digest
+(counters and labels only) to Athena's signed forge ingest. See
 [`deploy/README.md`](deploy/README.md).
 
 ## Configuration
@@ -229,6 +237,14 @@ A new OpenAI-compatible vendor needs no application code: add another
   public alias only; native model names appear solely in `ps` unmanaged rows.
   Exit codes: 0 = done, 1 = provider unreachable/error/not installed,
   2 = unknown alias or non-Ollama provider.
+- `uv run vulcan ledger-truncate --config vulcan.toml --before <cutoff>`
+  rewrites the usage ledger keeping only records at or after the cutoff
+  (`YYYY-MM-DD` in UTC, or a unix timestamp), bounding startup replay time for
+  a long-lived gateway. The gateway must be stopped first — its flock is
+  honored, never raced — and the rewrite is atomic with kept lines copied
+  byte-for-byte. History before the cutoff is gone for good: counters replay
+  only what remains. Exit codes: 0 = done, 1 = ledger missing/locked/not
+  configured, 2 = invalid cutoff or configuration.
 
 ### Migrating from schema v1
 
@@ -475,7 +491,8 @@ Deliberate limits, so this stays infrastructure rather than a billing system:
   silently falling back to memory, and a failed append is counted and logged
   but never fails the already-completed request. Writes are flushed per line,
   not fsynced: a hard power cut may lose the tail. One gateway per ledger
-  file.
+  file — enforced with an exclusive `flock` at startup, so a second gateway
+  pointed at the same ledger fails loudly instead of interleaving appends.
 - **Completed requests only.** A failed request is never counted as usage —
   Vulcan cannot know whether a failed upstream call consumed tokens.
 - **No invented tokens.** Providers that omit token counts contribute a request
@@ -599,8 +616,12 @@ live inventory; hosted providers always report `unchecked` without any probe.
   not inherit proxy settings, never retry automatically, never pull a model, and
   never fall back.
 - No external telemetry, analytics, credential persistence, or automatic
-  provider/model discovery. Vulcan only calls configured chat endpoints (for client
-  requests) and local Ollama `/api/tags` (for readiness).
+  provider/model discovery. Vulcan calls upstream endpoints only for: configured
+  chat and embeddings endpoints (for client requests), local Ollama `/api/tags`
+  (for readiness), and explicit operator CLI actions — `vulcan ps` (`/api/ps`),
+  `vulcan warmup`/`vulcan unload` (`/api/generate` or `/api/embed`), and
+  `vulcan check --verify-credentials` (one status-only `GET .../models` per
+  hosted provider).
 - The JSON log formatter emits only fixed application event names; unknown log
   messages and their arguments are not rendered. Keys containing prompt, message,
   content, response, body, authorization, cookie, credential, token, password,
@@ -613,9 +634,10 @@ live inventory; hosted providers always report `unchecked` without any probe.
 
 ## What Vulcan does not do
 
-No auth layer, multi-user state, telemetry, billing, cost tracking, quotas, model
-management or downloads, tools, images, agents,
-UI, deployment tooling, retries, fallback, or credential storage. Hosted providers
+No auth layer, multi-user state, telemetry, billing, or cost tracking — the
+per-seat budgets above are request/token caps enforced against the local
+ledger, not billing or money. No model management or downloads, tools, images,
+agents, UI, retries, fallback, or credential storage. Hosted providers
 are never probed for health or model catalogues; a hosted model's availability is
 learned when a request uses it. A shared SDK should wait until at least two
 consumers exist.
