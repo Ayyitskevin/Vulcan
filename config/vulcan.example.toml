@@ -42,6 +42,10 @@ probe_ttl_seconds = 5.0
 type = "ollama"
 base_url = "http://127.0.0.1:11434" # loopback only, no path
 timeout_seconds = 60.0
+# Optional, any provider type: bound the gap between chunks of one upstream
+# stream (0.1–300s). A stalled/slow-drip stream then fails as provider_timeout
+# instead of holding the request slot forever. Unset = wait indefinitely.
+# stream_idle_timeout_seconds = 30.0
 
 [providers.openai]
 type = "openai_compatible"

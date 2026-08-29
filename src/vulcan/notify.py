@@ -17,8 +17,11 @@ datagram, so it is implemented here rather than imported. Semantics:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import socket
+
+logger = logging.getLogger("vulcan.notify")
 
 
 def _socket_path(address: str) -> str:
@@ -79,7 +82,9 @@ async def _heartbeat_loop() -> None:
             _send(b"WATCHDOG=1")
         except OSError:
             # Stop heartbeating: the missed beats trip the watchdog, which is
-            # the loud failure path this mechanism exists to provide.
+            # the loud failure path this mechanism exists to provide. Say so
+            # once — heartbeats otherwise vanish from the journal unexplained.
+            logger.warning("heartbeat_stopped")
             return
         await asyncio.sleep(interval)
 

@@ -19,6 +19,7 @@ from vulcan.errors import (
     ModelUnavailableError,
     ProviderError,
     ProviderProtocolError,
+    ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
@@ -276,7 +277,7 @@ def test_ollama_maps_timeout_to_provider_timeout() -> None:
 
 @pytest.mark.parametrize(
     ("status_code", "retryable"),
-    [(400, False), (408, True), (429, True), (500, True), (503, True)],
+    [(400, False), (408, True), (500, True), (503, True)],
 )
 def test_ollama_maps_other_non_success_statuses_to_provider_error(
     status_code: int,
@@ -289,6 +290,17 @@ def test_ollama_maps_other_non_success_statuses_to_provider_error(
         asyncio.run(_invoke_ollama(handler))
 
     assert raised.value.retryable is retryable
+
+
+def test_ollama_maps_429_to_rate_limit_error_like_hosted_providers() -> None:
+    """A 429 must not depend on provider type: hosted and local both surface
+    provider_rate_limited (HTTP 429, retryable) — never a generic 502."""
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": "must not escape"})
+
+    with pytest.raises(ProviderRateLimitError):
+        asyncio.run(_invoke_ollama(handler))
 
 
 def test_ollama_maps_malformed_json_to_protocol_error() -> None:

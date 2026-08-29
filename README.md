@@ -160,6 +160,14 @@ class = "code"  # optional short routing label, surfaced in /v1/models
 keep_alive = "2h"  # optional, Ollama aliases only: residency TTL ("-1" pins, "0" unloads)
 ```
 
+`stream_idle_timeout_seconds` (optional, 0.1–300, unset by default on every
+provider type) bounds the gap between chunks of one upstream stream: a
+provider that drips one byte per interval would otherwise hold the stream —
+and the admission slot and budget reservation — indefinitely, since httpx's
+read timeout applies per socket read. A stall past the bound fails the
+request as `provider_timeout`. Omit it to wait out slow upstreams, exactly
+as before.
+
 Provider IDs are operator-chosen, match `[a-z0-9][a-z0-9_-]*`, and appear in API
 metadata and logs (they are safe, non-secret values). Startup requires at least one
 provider, at least one model with the callable `chat` capability, and every

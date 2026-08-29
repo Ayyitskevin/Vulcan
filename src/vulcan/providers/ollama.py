@@ -14,6 +14,7 @@ from vulcan.errors import (
     ModelUnavailableError,
     ProviderError,
     ProviderProtocolError,
+    ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
@@ -30,6 +31,7 @@ from vulcan.providers.base import (
 )
 from vulcan.providers.http import (
     build_client,
+    idle_bounded,
     iter_bounded_lines,
     open_response,
     read_bounded_json,
@@ -118,6 +120,7 @@ class OllamaProvider:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.provider_id = provider_id
+        self._stream_idle_seconds = config.stream_idle_timeout_seconds
         self._client = client or build_client(
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
@@ -158,7 +161,11 @@ class OllamaProvider:
             ):
                 raise ModelUnavailableError
             raise ProviderError(retryable=False)
-        raise ProviderError(retryable=status_code >= 500 or status_code in {408, 429})
+        if status_code == 429:
+            # Same condition as a hosted 429, same client-visible error class:
+            # retry/backoff semantics must not depend on the provider type.
+            raise ProviderRateLimitError
+        raise ProviderError(retryable=status_code >= 500 or status_code == 408)
 
     async def chat(self, request: ProviderChatRequest) -> ProviderChatResult:
         payload = self._payload(request, stream=False)
@@ -217,7 +224,7 @@ class OllamaProvider:
                 except ValueError:
                     error_body = None
                 self._raise_for_status(response.status_code, error_body)
-            async for line in iter_bounded_lines(response):
+            async for line in idle_bounded(iter_bounded_lines(response), self._stream_idle_seconds):
                 if not line.strip():
                     continue
                 try:

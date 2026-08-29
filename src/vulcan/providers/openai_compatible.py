@@ -35,6 +35,7 @@ from vulcan.providers.base import (
 )
 from vulcan.providers.http import (
     build_client,
+    idle_bounded,
     iter_sse_payloads,
     open_response,
     raise_for_hosted_status,
@@ -157,6 +158,7 @@ class OpenAICompatibleProvider:
         self.provider_id = provider_id
         self._api_key_env = config.api_key_env
         self._max_tokens_field = config.max_tokens_field
+        self._stream_idle_seconds = config.stream_idle_timeout_seconds
         self._client = client or build_client(
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
@@ -241,7 +243,7 @@ class OpenAICompatibleProvider:
             if not response.is_success:
                 # Body is never read: classification uses the status only.
                 raise_for_hosted_status(response.status_code)
-            async for data in iter_sse_payloads(response):
+            async for data in idle_bounded(iter_sse_payloads(response), self._stream_idle_seconds):
                 if data == SSE_DONE:
                     break
                 if not data:

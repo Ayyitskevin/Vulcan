@@ -543,3 +543,26 @@ def test_streams_close_upstream_on_a_clean_finish() -> None:
     asyncio.run(run())
 
     assert stream.closed is True
+
+
+def test_verification_never_closes_a_caller_supplied_client() -> None:
+    """Ownership rule: verify closes only the client it built itself."""
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    config = _compat_config()
+    client = httpx.AsyncClient(
+        base_url=config.base_url,
+        transport=httpx.MockTransport(handler),
+        trust_env=False,
+    )
+
+    async def run() -> str:
+        try:
+            return await verify_hosted_credential(config, client=client)
+        finally:
+            assert not client.is_closed  # still the caller's to close
+            await client.aclose()
+
+    assert asyncio.run(run()) == "verified"

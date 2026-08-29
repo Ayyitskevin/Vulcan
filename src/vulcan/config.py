@@ -62,7 +62,7 @@ class ServerConfig(StrictConfigModel):
 def _reject_boolean_timeout(value: object) -> object:
     if isinstance(value, bool):
         raise PydanticCustomError(
-            "boolean_not_allowed", "provider timeout_seconds must be numeric, not boolean"
+            "boolean_not_allowed", "provider timeout fields must be numeric, not boolean"
         )
     return value
 
@@ -131,10 +131,11 @@ class OllamaProviderConfig(StrictConfigModel):
     type: Literal["ollama"]
     base_url: str
     timeout_seconds: float = Field(strict=True, ge=0.1, le=300.0)
+    stream_idle_timeout_seconds: float | None = Field(default=None, strict=True, ge=0.1, le=300.0)
 
-    _timeout_not_boolean = field_validator("timeout_seconds", mode="before")(
-        _reject_boolean_timeout
-    )
+    _timeout_not_boolean = field_validator(
+        "timeout_seconds", "stream_idle_timeout_seconds", mode="before"
+    )(_reject_boolean_timeout)
 
     @field_validator("base_url")
     @classmethod
@@ -148,10 +149,11 @@ class AnthropicProviderConfig(StrictConfigModel):
     api_key_env: str = Field(pattern=ENV_VAR_NAME_PATTERN)
     timeout_seconds: float = Field(strict=True, ge=0.1, le=300.0)
     default_max_tokens: int = Field(default=4096, strict=True, ge=1, le=32768)
+    stream_idle_timeout_seconds: float | None = Field(default=None, strict=True, ge=0.1, le=300.0)
 
-    _timeout_not_boolean = field_validator("timeout_seconds", mode="before")(
-        _reject_boolean_timeout
-    )
+    _timeout_not_boolean = field_validator(
+        "timeout_seconds", "stream_idle_timeout_seconds", mode="before"
+    )(_reject_boolean_timeout)
 
     @field_validator("base_url")
     @classmethod
@@ -165,10 +167,11 @@ class OpenAICompatibleProviderConfig(StrictConfigModel):
     api_key_env: str = Field(pattern=ENV_VAR_NAME_PATTERN)
     timeout_seconds: float = Field(strict=True, ge=0.1, le=300.0)
     max_tokens_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    stream_idle_timeout_seconds: float | None = Field(default=None, strict=True, ge=0.1, le=300.0)
 
-    _timeout_not_boolean = field_validator("timeout_seconds", mode="before")(
-        _reject_boolean_timeout
-    )
+    _timeout_not_boolean = field_validator(
+        "timeout_seconds", "stream_idle_timeout_seconds", mode="before"
+    )(_reject_boolean_timeout)
 
     @field_validator("base_url")
     @classmethod

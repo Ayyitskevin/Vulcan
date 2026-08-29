@@ -166,3 +166,24 @@ def test_lifespan_announces_ready_and_stops_heartbeats(
     assert b"WATCHDOG=1" in during
     quiet = _collect(receiver)
     assert b"WATCHDOG=1" not in quiet
+
+
+def test_heartbeat_loop_logs_once_when_the_socket_dies(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The watchdog trips by design when beats stop — but the app must say WHY
+    the beats stopped, or the journal goes silent at the exact moment it matters."""
+
+    import logging
+
+    monkeypatch.setenv("WATCHDOG_USEC", "200000")
+
+    def dead_send(payload: bytes) -> None:
+        raise OSError("socket gone")
+
+    monkeypatch.setattr(notify, "_send", dead_send)
+    with caplog.at_level(logging.WARNING, logger="vulcan.notify"):
+        asyncio.run(notify._heartbeat_loop())  # returns instead of beating forever
+
+    assert caplog.text.count("heartbeat_stopped") == 1

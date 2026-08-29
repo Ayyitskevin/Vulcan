@@ -484,6 +484,16 @@ def test_anthropic_stream_local_guards_run_before_any_io() -> None:
     with pytest.raises(UnsupportedCapabilityError):
         _collect(_anthropic_provider(handler), assistant_first)
 
+    # Empty text blocks 400 upstream; the guard refuses them before any I/O.
+    empty_content = ProviderChatRequest(
+        provider_model="native-model",
+        messages=(ProviderMessage(role="user", content="   "),),
+        temperature=None,
+        max_tokens=None,
+    )
+    with pytest.raises(UnsupportedCapabilityError):
+        _collect(_anthropic_provider(handler), empty_content)
+
 
 # ── Ollama adapter ───────────────────────────────────────────────────────────
 
@@ -1027,3 +1037,112 @@ def test_openapi_documents_the_streaming_capability() -> None:
         capabilities = client.get("/v1/capabilities").json()
 
     assert capabilities["chat_completions"]["streaming"] is True
+
+
+# ── Stream stall watchdog (operator-configured idle bound) ───────────────────
+
+
+class _DrippingStream(httpx.AsyncByteStream):
+    """An upstream body that delivers its first chunk, then stalls.
+
+    httpx's read timeout applies per socket read, so a drip like this is
+    exactly what the configured idle bound exists to cut short.
+    """
+
+    def __init__(self, chunks: list[bytes], stall_seconds: float) -> None:
+        self._chunks = chunks
+        self._stall = stall_seconds
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for index, chunk in enumerate(self._chunks):
+            if index:
+                await asyncio.sleep(self._stall)
+            yield chunk
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_compat_stream_stall_is_a_timeout_when_idle_bound_is_configured() -> None:
+    stream = _DrippingStream(
+        [
+            _sse(json.dumps({"choices": [{"delta": {"content": "first"}}]})),
+            _sse(json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}), "[DONE]"),
+        ],
+        stall_seconds=0.3,
+    )
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+
+    with pytest.raises(ProviderTimeoutError):
+        _collect(_compat_provider(handler, stream_idle_timeout_seconds=0.1))
+
+
+def test_anthropic_stream_stall_is_a_timeout_when_idle_bound_is_configured() -> None:
+    stream = _DrippingStream(
+        [
+            _sse(
+                json.dumps(
+                    {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x"}}
+                )
+            ),
+            _sse(json.dumps({"type": "message_stop"})),
+        ],
+        stall_seconds=0.3,
+    )
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+
+    with pytest.raises(ProviderTimeoutError):
+        _collect(_anthropic_provider(handler, stream_idle_timeout_seconds=0.1))
+
+
+def test_ollama_stream_stall_is_a_timeout_when_idle_bound_is_configured() -> None:
+    stream = _DrippingStream(
+        [
+            _ndjson({"message": {"role": "assistant", "content": "x"}, "done": False}),
+            _ndjson({"done": True, "done_reason": "stop"}),
+        ],
+        stall_seconds=0.3,
+    )
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    config = OllamaProviderConfig(
+        type="ollama",
+        base_url="http://127.0.0.1:11434",
+        timeout_seconds=1.0,
+        stream_idle_timeout_seconds=0.1,
+    )
+    client = httpx.AsyncClient(
+        base_url=config.base_url,
+        transport=httpx.MockTransport(handler),
+        trust_env=False,
+    )
+
+    with pytest.raises(ProviderTimeoutError):
+        _collect(OllamaProvider("local-ollama", config, client=client))
+
+
+def test_stream_stall_completes_normally_when_no_idle_bound_is_configured() -> None:
+    """Absent means byte-identical: a slow upstream is waited out, as before."""
+
+    stream = _DrippingStream(
+        [
+            _sse(json.dumps({"choices": [{"delta": {"content": "slow"}}]})),
+            _sse(json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}), "[DONE]"),
+        ],
+        stall_seconds=0.2,
+    )
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+
+    events = _collect(_compat_provider(handler))
+    assert events == [
+        StreamDelta(text="slow"),
+        StreamEnd(finish_reason="stop", usage=None),
+    ]

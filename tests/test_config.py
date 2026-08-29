@@ -806,3 +806,33 @@ def test_server_max_concurrent_requests_rejects_non_positive_or_non_integer(
 
     with pytest.raises(ValidationError):
         GatewayConfig.model_validate(valid_config_document)
+
+
+def test_providers_default_to_no_stream_idle_bound() -> None:
+    ollama = OllamaProviderConfig(
+        type="ollama", base_url="http://127.0.0.1:11434", timeout_seconds=60
+    )
+
+    assert ollama.stream_idle_timeout_seconds is None  # unset = byte-identical wire behavior
+
+
+def test_providers_accept_a_stream_idle_timeout() -> None:
+    ollama = OllamaProviderConfig(
+        type="ollama",
+        base_url="http://127.0.0.1:11434",
+        timeout_seconds=60,
+        stream_idle_timeout_seconds=5,
+    )
+
+    assert ollama.stream_idle_timeout_seconds == 5.0
+
+
+@pytest.mark.parametrize("value", [True, 0.0, -1.5, 300.01])
+def test_providers_reject_invalid_stream_idle_timeouts(value: object) -> None:
+    with pytest.raises(ValidationError):
+        OllamaProviderConfig(
+            type="ollama",
+            base_url="http://127.0.0.1:11434",
+            timeout_seconds=60,
+            stream_idle_timeout_seconds=value,
+        )

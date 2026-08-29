@@ -9,6 +9,7 @@ stored on a client, logged, or attached to an error.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator, Mapping
@@ -25,6 +26,7 @@ from vulcan.errors import (
     ProviderError,
     ProviderProtocolError,
     ProviderRateLimitError,
+    ProviderTimeoutError,
     ProviderUnavailableError,
 )
 
@@ -236,6 +238,32 @@ async def iter_sse_payloads(response: httpx.Response) -> AsyncIterator[str]:
             yield line[len("data:") :].strip()
 
 
+async def idle_bounded(
+    payloads: AsyncIterator[str], idle_seconds: float | None
+) -> AsyncIterator[str]:
+    """Bound the gap between upstream stream events; a stalled stream is a timeout.
+
+    httpx's read timeout applies per socket read, so an upstream that drips
+    one byte per interval would otherwise hold the stream — and the gateway's
+    admission slot and budget reservation — indefinitely. ``None`` keeps
+    byte-identical behavior (the operator opted no idle bound in).
+    """
+
+    if idle_seconds is None:
+        async for item in payloads:
+            yield item
+        return
+    inner = payloads.__aiter__()
+    while True:
+        try:
+            item = await asyncio.wait_for(inner.__anext__(), idle_seconds)
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            raise ProviderTimeoutError from None
+        yield item
+
+
 CredentialVerdict = Literal["verified", "auth_failed", "unreachable", "error", "missing"]
 
 
@@ -279,7 +307,10 @@ async def verify_hosted_credential(
         # Timeouts are a kind of RequestError: both mean "could not confirm".
         return "unreachable"
     finally:
-        await verifier.aclose()
+        if client is None:
+            # Only ever close what this function built — a caller-supplied
+            # client belongs to the caller.
+            await verifier.aclose()
 
     if 200 <= status_code < 300:
         return "verified"

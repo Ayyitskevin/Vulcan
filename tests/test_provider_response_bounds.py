@@ -197,7 +197,9 @@ def test_credential_verification_never_reads_the_body_and_closes_resources(
         finally:
             await client.aclose()
 
-    assert asyncio.run(run()) == ("verified", True)
+    # The upstream RESPONSE is closed without being read; the caller-supplied
+    # client is the caller's — verify closes only what it builds itself.
+    assert asyncio.run(run()) == ("verified", False)
     assert stream.iterated is False
     assert stream.closed is True
 
