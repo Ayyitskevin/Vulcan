@@ -42,6 +42,28 @@ jobs:
       # ephemeral loopback port; stdlib + `ss` only, both on ubuntu-latest.
       - run: uv run python scripts/smoke.py
 
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned binary release, same as gitleaks below: the deploy scripts have
+      # shipped the last production bugs, so the gate runs the exact version
+      # the repo was verified against, not whatever apt ships today.
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          version="0.11.0"
+          tarball="shellcheck-v${version}.linux.x86_64.tar.xz"
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${version}/${tarball}" \
+            -o "/tmp/${tarball}"
+          sudo tar -xJf "/tmp/${tarball}" -C /usr/local/bin \
+            --strip-components=1 "shellcheck-v${version}/shellcheck"
+          shellcheck --version
+      # git ls-files (not a glob) so any shell script added anywhere in the
+      # repo joins the gate automatically.
+      - run: git ls-files '*.sh' | xargs -r shellcheck -x
+
   secret-scan:
     name: secret-scan
     runs-on: ubuntu-latest
