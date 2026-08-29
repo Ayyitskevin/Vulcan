@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +130,16 @@ def test_unopenable_ledger_fails_loud_never_silent(tmp_path: Path) -> None:
 
     with pytest.raises(LedgerError):
         UsageLedger(unwritable_dir, clock=lambda: 0.0)
+
+
+def test_new_ledger_file_is_owner_only(tmp_path: Path) -> None:
+    path = tmp_path / "usage.jsonl"
+
+    ledger = UsageLedger(path, clock=lambda: 0.0)
+    try:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    finally:
+        ledger.close()
 
 
 # ── The point of the feature: /v1/usage survives a restart ───────────────────

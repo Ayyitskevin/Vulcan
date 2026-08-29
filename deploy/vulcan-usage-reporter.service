@@ -36,8 +36,12 @@ EnvironmentFile=-/home/kevin-lee/deploy/vulcan-data/usage-reporter.env
 
 NoNewPrivileges=true
 ProtectSystem=strict
+ProtectHome=read-only
 ReadWritePaths=/home/kevin-lee/deploy/vulcan-data
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

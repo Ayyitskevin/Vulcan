@@ -164,7 +164,12 @@ class UsageLedger:
         self.stats = LedgerStats()
         self._replay_done = False
         try:
+            created = not path.exists()
             self._handle: IO[str] = path.open("a", encoding="utf-8")
+            if created:
+                # Alias/seat/token metadata deserves the same 0600 discipline
+                # as the env files; the process umask alone would give 0644.
+                path.chmod(0o600)
             try:
                 import fcntl
 

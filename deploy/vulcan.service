@@ -41,11 +41,20 @@ SyslogIdentifier=vulcan
 
 NoNewPrivileges=true
 ProtectSystem=strict
+# The process proxies hosted BYOK keys; read-only home keeps it away from the
+# operator's other credentials (~/.ssh, other .env files). ReadWritePaths
+# below re-opens the state dir for writing, code stays readable.
+ProtectHome=read-only
 ReadWritePaths=/home/kevin-lee/deploy/vulcan-data
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+# sd_notify needs AF_UNIX; the listener, Ollama, and hosted HTTPS need
+# AF_INET/AF_INET6. Nothing else.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
