@@ -448,3 +448,146 @@ def test_replay_is_once_only(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="once-only"):
         ledger.replay(lambda record: None)
     ledger.close()
+
+
+# ── Truncation: bounding ledger growth is an explicit operator action ────────
+
+
+def _ledger_line(ts: int, *, seat: str | None = "fable") -> bytes:
+    record = {
+        "completion_tokens": 2,
+        "model": "alias-one",
+        "prompt_tokens": 5,
+        "provider": "det",
+        "seat": seat,
+        "ts": ts,
+    }
+    return json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+
+
+def test_truncate_keeps_recent_drops_old_and_poison(tmp_path: Path) -> None:
+    from vulcan.usage import truncate_ledger
+
+    path = tmp_path / "usage.jsonl"
+    path.write_bytes(
+        _ledger_line(100)  # old: dropped
+        + b'{"not": "a-ledger-line"}\n'  # poison: dropped
+        + b"\n"  # blank: skipped silently, like replay
+        + _ledger_line(200)
+    )
+
+    stats = truncate_ledger(path, cutoff_ts=150)
+
+    assert stats == {"kept": 1, "dropped_old": 1, "dropped_invalid": 1}
+    assert path.read_bytes() == _ledger_line(200)  # kept lines byte-for-byte
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_truncate_counts_oversized_lines_as_invalid_without_buffering_them(
+    tmp_path: Path,
+) -> None:
+    from vulcan.usage import truncate_ledger
+
+    path = tmp_path / "usage.jsonl"
+    path.write_bytes(b"{" + b"x" * 10000 + b"\n" + _ledger_line(200))
+
+    stats = truncate_ledger(path, cutoff_ts=0)
+
+    assert stats == {"kept": 1, "dropped_old": 0, "dropped_invalid": 1}
+    assert path.read_bytes() == _ledger_line(200)
+
+
+def test_truncate_refuses_a_locked_ledger(tmp_path: Path) -> None:
+    from vulcan.usage import truncate_ledger
+
+    path = tmp_path / "usage.jsonl"
+    ledger = UsageLedger(path, clock=lambda: 0.0)  # a running gateway holds this flock
+    try:
+        with pytest.raises(LedgerError):
+            truncate_ledger(path, cutoff_ts=0)
+    finally:
+        ledger.close()
+
+
+def test_truncate_missing_file_fails_loud(tmp_path: Path) -> None:
+    from vulcan.usage import truncate_ledger
+
+    with pytest.raises(LedgerError):
+        truncate_ledger(tmp_path / "missing.jsonl", cutoff_ts=0)
+
+
+def _truncate_cli_config(tmp_path: Path, ledger_path: Path, *, with_usage: bool = True) -> Path:
+    usage_section = f'[usage]\nledger_path = "{ledger_path}"\n\n' if with_usage else ""
+    return _write_toml(
+        tmp_path,
+        usage_section
+        + """
+[providers.det]
+type = "deterministic"
+response_text = "canned"
+
+[[models]]
+id = "alias-one"
+provider = "det"
+provider_model = "native-one"
+capabilities = ["chat", "embeddings"]
+""",
+    )
+
+
+def _write_toml(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "vulcan.toml"
+    path.write_text("schema_version = 2\n\n" + body, encoding="utf-8")
+    return path
+
+
+def test_ledger_truncate_cli_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from datetime import UTC, datetime
+
+    from vulcan.cli import main
+
+    cutoff = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp())
+    ledger_path = tmp_path / "usage.jsonl"
+    ledger_path.write_bytes(_ledger_line(cutoff - 10) + _ledger_line(cutoff + 10))
+    config_path = _truncate_cli_config(tmp_path, ledger_path)
+
+    exit_code = main(["ledger-truncate", "--config", str(config_path), "--before", "2026-08-01"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out) == {
+        "ledger": str(ledger_path),
+        "cutoff_ts": cutoff,
+        "kept": 1,
+        "dropped_old": 1,
+        "dropped_invalid": 0,
+    }
+    assert ledger_path.read_bytes() == _ledger_line(cutoff + 10)
+
+
+def test_ledger_truncate_cli_rejects_a_bad_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vulcan.cli import main
+
+    config_path = _truncate_cli_config(tmp_path, tmp_path / "usage.jsonl")
+
+    exit_code = main(["ledger-truncate", "--config", str(config_path), "--before", "last-tuesday"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert json.loads(captured.err)["error"]["code"] == "invalid_cutoff"
+
+
+def test_ledger_truncate_cli_without_a_usage_section(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vulcan.cli import main
+
+    config_path = _truncate_cli_config(tmp_path, tmp_path / "usage.jsonl", with_usage=False)
+
+    exit_code = main(["ledger-truncate", "--config", str(config_path), "--before", "2026-08-01"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert json.loads(captured.err)["error"]["code"] == "ledger_not_configured"

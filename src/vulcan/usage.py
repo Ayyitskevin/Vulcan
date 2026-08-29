@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -39,6 +40,10 @@ _LEDGER_KEYS = frozenset({"completion_tokens", "model", "prompt_tokens", "provid
 # Real lines are ~200 bytes; anything past this is poison and is skipped in
 # bounded chunks so a single huge unterminated line cannot exhaust memory.
 _MAX_LINE_BYTES = 8192
+# DoS guard, same shape as budgets._MAX_TRACKED_SEATS: caller-chosen seat
+# labels are unbounded, but per-label counter state must not be. Beyond the
+# cap a new label is counted (untracked_seat_requests) but not attributed.
+_MAX_TRACKED_SEATS = 4096
 
 
 def _valid_ledger_record(record: object) -> bool:
@@ -145,6 +150,9 @@ class UsageSnapshot:
     by_provider: tuple[ProviderUsage, ...]
     by_seat: tuple[SeatUsage, ...]
     ledger: LedgerStats | None = None
+    # Requests whose seat label arrived after the cardinality cap filled:
+    # counted here, deliberately absent from by_seat.
+    untracked_seat_requests: int = 0
 
 
 class UsageLedger:
@@ -266,6 +274,76 @@ class UsageLedger:
             logger.error("usage_ledger_close_failed")
 
 
+def truncate_ledger(path: Path, *, cutoff_ts: int) -> dict[str, int]:
+    """Rewrite the ledger keeping only valid records at or after ``cutoff_ts``.
+
+    Bounds boot replay time for a long-lived gateway: history before the
+    cutoff is gone for good (counters replay only what remains), so this is
+    an explicit operator command, never automatic. Fails loud when the file
+    is missing or locked — the same flock contract the writer holds, so a
+    running gateway refuses the truncation instead of racing it. The rewrite
+    is atomic: a 0600 temp file in the same directory, fsynced, then
+    os.replace. Kept lines are copied byte-for-byte.
+    """
+
+    stats = {"kept": 0, "dropped_old": 0, "dropped_invalid": 0}
+    try:
+        handle = path.open("rb")
+    except OSError as exc:
+        raise LedgerError(path, exc.__class__.__name__) from exc
+    with handle:
+        try:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                # A running gateway holds this lock for its whole lifetime.
+                raise LedgerError(
+                    path, f"locked by another process ({exc.__class__.__name__})"
+                ) from exc
+        except ImportError:  # pragma: no cover - non-POSIX platforms
+            pass
+        tmp_path = path.with_name(path.name + ".truncate-tmp")
+        try:
+            with tmp_path.open("wb") as tmp:
+                tmp_path.chmod(0o600)
+                while True:
+                    raw_line = handle.readline(_MAX_LINE_BYTES + 1)
+                    if not raw_line:
+                        break
+                    if len(raw_line) > _MAX_LINE_BYTES:
+                        # Oversized: count once, drain to newline in bounded
+                        # chunks, never hold more than one chunk.
+                        stats["dropped_invalid"] += 1
+                        while raw_line and not raw_line.endswith(b"\n"):
+                            raw_line = handle.readline(_MAX_LINE_BYTES + 1)
+                        continue
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        record = json.loads(raw_line.decode("utf-8").strip())
+                    except (UnicodeDecodeError, ValueError):
+                        stats["dropped_invalid"] += 1
+                        continue
+                    if not _valid_ledger_record(record):
+                        stats["dropped_invalid"] += 1
+                        continue
+                    ts = record["ts"]
+                    if isinstance(ts, int) and ts >= cutoff_ts:
+                        stats["kept"] += 1
+                        tmp.write(raw_line if raw_line.endswith(b"\n") else raw_line + b"\n")
+                    else:
+                        stats["dropped_old"] += 1
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    return stats
+
+
 def _totals(counter: _Counter) -> UsageTotals:
     return UsageTotals(
         requests=counter.requests,
@@ -284,6 +362,8 @@ class UsageRecorder:
     _by_provider: dict[str, _Counter] = field(default_factory=dict)
     _by_seat: dict[str, _Counter] = field(default_factory=dict)
     _ledger: UsageLedger | None = None
+    _untracked_seat_requests: int = 0
+    _seat_cap_warned: bool = False
 
     @classmethod
     def with_ledger(cls, ledger: UsageLedger, *, budget_book=None) -> UsageRecorder:
@@ -341,7 +421,19 @@ class UsageRecorder:
         # Attribution is optional: unlabeled requests still count in the totals
         # and the model/provider views, they just never appear under a seat.
         if seat is not None:
-            self._by_seat.setdefault(seat, _Counter()).record(prompt_tokens, completion_tokens)
+            if seat in self._by_seat or len(self._by_seat) < _MAX_TRACKED_SEATS:
+                self._by_seat.setdefault(seat, _Counter()).record(prompt_tokens, completion_tokens)
+            else:
+                # Cardinality guard tripped: the request still counted in the
+                # totals and model/provider views above, and is counted here
+                # honestly rather than silently attributed or silently dropped.
+                self._untracked_seat_requests += 1
+                if not self._seat_cap_warned:
+                    self._seat_cap_warned = True
+                    logger.warning(
+                        "seat_cardinality_capped",
+                        extra={"metadata": {"max_tracked_seats": _MAX_TRACKED_SEATS}},
+                    )
 
     def record(
         self,
@@ -393,4 +485,5 @@ class UsageRecorder:
                 for seat, counter in sorted(self._by_seat.items())
             ),
             ledger=self._ledger.stats if self._ledger is not None else None,
+            untracked_seat_requests=self._untracked_seat_requests,
         )

@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ from vulcan.config import (
 )
 from vulcan.observability import configure_logging
 from vulcan.providers.http import build_client, credential_available, verify_hosted_credential
-from vulcan.usage import LedgerError
+from vulcan.usage import LedgerError, truncate_ledger
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -72,6 +73,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     warmup.add_argument("alias", help="configured alias on an ollama-typed provider")
     warmup.add_argument("--config", type=Path, required=True, help="path to a Vulcan TOML config")
+    ledger_truncate = subcommands.add_parser(
+        "ledger-truncate",
+        help=(
+            "rewrite the usage ledger keeping only records at or after a cutoff; "
+            "the gateway must be stopped (its flock is honored, never raced)"
+        ),
+    )
+    ledger_truncate.add_argument(
+        "--config", type=Path, required=True, help="path to a Vulcan TOML config"
+    )
+    ledger_truncate.add_argument(
+        "--before",
+        required=True,
+        help="drop records older than this cutoff: YYYY-MM-DD (UTC) or a unix timestamp",
+    )
     return parser
 
 
@@ -85,6 +101,59 @@ def _write_config_error(exc: ConfigLoadError) -> None:
         }
     }
     sys.stderr.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+
+
+def _parse_cutoff(value: str) -> int | None:
+    """YYYY-MM-DD (UTC midnight) or a bare unix timestamp; None when neither."""
+
+    if value.isdigit():
+        return int(value)
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return int(parsed.replace(tzinfo=UTC).timestamp())
+
+
+def _ledger_truncate_report(config: GatewayConfig, *, before: str) -> tuple[dict[str, Any], int]:
+    """Truncate the configured ledger, with the same sanitized error shape as check."""
+
+    cutoff = _parse_cutoff(before)
+    if cutoff is None:
+        payload = {
+            "error": {
+                "code": "invalid_cutoff",
+                "message": "--before must be YYYY-MM-DD (UTC) or a unix timestamp.",
+                "retryable": False,
+            }
+        }
+        return payload, 2
+    if config.usage is None:
+        payload = {
+            "error": {
+                "code": "ledger_not_configured",
+                "message": "The config has no [usage] ledger_path; there is no ledger to truncate.",
+                "retryable": False,
+            }
+        }
+        return payload, 1
+    path = config.usage.ledger_path
+    try:
+        stats = truncate_ledger(path, cutoff_ts=cutoff)
+    except LedgerError as exc:
+        payload = {
+            "error": {
+                "code": "ledger_error",
+                "message": (
+                    f"The usage ledger at {exc.path} could not be truncated ({exc.reason}). "
+                    "A running gateway holds the ledger lock for its lifetime — stop it first."
+                ),
+                "retryable": False,
+            }
+        }
+        return payload, 1
+    report: dict[str, Any] = {"ledger": str(path), "cutoff_ts": cutoff, **stats}
+    return report, 0
 
 
 async def _verify_hosted_credentials(config: GatewayConfig) -> dict[str, str]:
@@ -371,6 +440,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "check":
         report, exit_code = _check_report(config, verify=args.verify_credentials)
         sys.stdout.write(json.dumps(report, separators=(",", ":"), sort_keys=True) + "\n")
+        return exit_code
+
+    if args.command == "ledger-truncate":
+        report, exit_code = _ledger_truncate_report(config, before=args.before)
+        stream = sys.stdout if exit_code == 0 else sys.stderr
+        stream.write(json.dumps(report, separators=(",", ":"), sort_keys=True) + "\n")
         return exit_code
 
     if args.command == "usage":

@@ -288,6 +288,9 @@ class UsageResponse(StrictSchema):
     by_model: tuple[ModelUsageRecord, ...]
     by_provider: tuple[ProviderUsageRecord, ...]
     by_seat: tuple[SeatUsageRecord, ...]
+    # Requests whose seat label arrived after the recorder's cardinality cap
+    # filled: counted here, deliberately absent from by_seat.
+    untracked_seat_requests: int = Field(default=0, ge=0)
     ledger: LedgerRecord | None = None
     budgets: tuple[SeatBudgetRecord, ...] | None = None
 

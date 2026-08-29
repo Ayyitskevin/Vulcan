@@ -570,6 +570,7 @@ def create_app(
                 SeatUsageRecord(seat=item.seat, totals=_usage_totals(item.totals))
                 for item in snapshot.by_seat
             ),
+            untracked_seat_requests=snapshot.untracked_seat_requests,
             ledger=ledger_record,
             budgets=budget_rows,
         )

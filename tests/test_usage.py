@@ -91,6 +91,37 @@ def test_recorder_accepts_prompt_only_usage_for_embeddings() -> None:
     assert totals.total_tokens == 12
 
 
+def test_recorder_caps_tracked_seats_and_counts_the_overflow_honestly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A label flood must not grow seat state without limit.
+
+    Same guard shape as budgets._MAX_TRACKED_SEATS: past the cap a new label
+    is counted (untracked_seat_requests) but never attributed, while the
+    totals and the already-tracked seats are unaffected.
+    """
+
+    import logging
+
+    from vulcan.usage import _MAX_TRACKED_SEATS
+
+    recorder = UsageRecorder()
+    with caplog.at_level(logging.WARNING, logger="vulcan.usage"):
+        for index in range(_MAX_TRACKED_SEATS + 3):
+            recorder.record(model="a", provider="p1", seat=f"flood-{index}")
+        recorder.record(model="a", provider="p1", seat="flood-one-more")
+    snapshot = recorder.snapshot()
+
+    assert len(snapshot.by_seat) == _MAX_TRACKED_SEATS
+    assert snapshot.untracked_seat_requests == 4
+    assert snapshot.totals.requests == _MAX_TRACKED_SEATS + 4  # nothing lost
+    # An already-tracked seat still attributes normally after the cap trips.
+    recorder.record(model="a", provider="p1", seat="flood-0")
+    assert recorder.snapshot().by_seat[0].totals.requests == 2
+    # The cap is named in the logs once per recorder, never per request.
+    assert caplog.text.count("seat_cardinality_capped") == 1
+
+
 def test_recorder_snapshot_is_sorted_and_stable() -> None:
     recorder = UsageRecorder()
     for model, provider in (("z", "p2"), ("a", "p1"), ("m", "p1")):
@@ -224,6 +255,7 @@ def test_usage_starts_empty_and_reports_process_scope() -> None:
         "by_model": [],
         "by_provider": [],
         "by_seat": [],
+        "untracked_seat_requests": 0,
         "ledger": None,
         "budgets": None,
     }
@@ -457,6 +489,7 @@ def test_usage_json_is_stable_for_operators() -> None:
         "by_model",
         "by_provider",
         "by_seat",
+        "untracked_seat_requests",
         "ledger",
         "budgets",
     }
