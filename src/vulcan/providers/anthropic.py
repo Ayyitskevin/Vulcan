@@ -91,6 +91,8 @@ class _AnthropicStreamDelta(BaseModel):
     type: str | None = None
     text: str | None = None
     stop_reason: str | None = None
+    # Arguments arrive as JSON fragments; only the concatenation parses.
+    partial_json: str | None = None
 
 
 class _AnthropicStreamMessage(BaseModel):
@@ -109,6 +111,7 @@ class _AnthropicStreamEvent(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     type: str
+    index: int | None = None
     message: _AnthropicStreamMessage | None = None
     content_block: _AnthropicContentBlock | None = None
     delta: _AnthropicStreamDelta | None = None
@@ -323,6 +326,8 @@ class AnthropicProvider:
         payload = self._payload(request, stream=True)
         api_key = resolve_api_key(self._api_key_env)
         finish_reason: Literal["stop", "length"] | None = None
+        streaming_calls: dict[int | None, dict[str, str]] = {}
+        discarded_blocks: set[int | None] = set()
         input_tokens: int | None = None
         output_tokens: int | None = None
 
@@ -365,17 +370,42 @@ class AnthropicProvider:
                     if event.message is not None and event.message.usage is not None:
                         input_tokens = event.message.usage.input_tokens
                 elif event.type == "content_block_start":
-                    # Vulcan requests no tools or thinking: any other block
-                    # type would silently truncate the visible reply.
-                    if event.content_block is None or event.content_block.type != "text":
+                    block = event.content_block
+                    if block is None:
                         raise ProviderProtocolError
-                    if event.content_block.text:
-                        yield StreamDelta(text=event.content_block.text)
+                    if block.type == "tool_use":
+                        if block.id is None or block.name is None:
+                            raise ProviderProtocolError
+                        streaming_calls[event.index] = {
+                            "id": block.id,
+                            "name": block.name,
+                            "arguments": "",
+                        }
+                        discarded_blocks.discard(event.index)
+                    elif block.type in _DISCARDED_BLOCK_TYPES:
+                        # Thinking is not the answer and is never yielded.
+                        discarded_blocks.add(event.index)
+                    elif block.type == "text":
+                        if block.text:
+                            yield StreamDelta(text=block.text)
+                    else:
+                        # An unknown block would silently truncate the reply.
+                        raise ProviderProtocolError
                 elif event.type == "content_block_delta":
-                    if event.delta is None or event.delta.type != "text_delta":
+                    if event.delta is None:
                         raise ProviderProtocolError
-                    if event.delta.text:
-                        yield StreamDelta(text=event.delta.text)
+                    if event.delta.type == "input_json_delta":
+                        call = streaming_calls.get(event.index)
+                        if call is None:
+                            raise ProviderProtocolError
+                        call["arguments"] += event.delta.partial_json or ""
+                    elif event.index in discarded_blocks:
+                        continue
+                    elif event.delta.type == "text_delta":
+                        if event.delta.text:
+                            yield StreamDelta(text=event.delta.text)
+                    else:
+                        raise ProviderProtocolError
                 elif event.type == "message_delta":
                     if event.delta is not None and event.delta.stop_reason is not None:
                         finish_reason = _finish_reason(event.delta.stop_reason)
@@ -393,9 +423,19 @@ class AnthropicProvider:
         finally:
             await response.aclose()
 
+        streamed_calls = (
+            tuple(
+                ProviderToolCall(
+                    id=call["id"], name=call["name"], arguments=call["arguments"] or "{}"
+                )
+                for _, call in sorted(streaming_calls.items(), key=lambda item: item[0] or 0)
+            )
+            or None
+        )
         yield StreamEnd(
-            finish_reason=finish_reason,
+            finish_reason="tool_calls" if streamed_calls else finish_reason,
             usage=_usage(_AnthropicUsage(input_tokens=input_tokens, output_tokens=output_tokens)),
+            tool_calls=streamed_calls,
         )
 
     async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:

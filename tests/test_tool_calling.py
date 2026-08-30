@@ -17,7 +17,12 @@ import pytest
 from pydantic import ValidationError
 
 from vulcan.config import OllamaProviderConfig
-from vulcan.providers.base import ProviderChatRequest, ProviderMessage, ProviderTool
+from vulcan.providers.base import (
+    ProviderChatRequest,
+    ProviderMessage,
+    ProviderTool,
+    StreamEnd,
+)
 from vulcan.providers.ollama import OllamaProvider
 from vulcan.schemas import AssistantMessage, ChatCompletionRequest, ChunkDelta
 
@@ -442,3 +447,128 @@ def test_anthropic_thinking_block_beside_a_tool_call_is_discarded_not_joined() -
     assert result.tool_calls[0].name == "get_weather"
     # The reasoning text must not have become the answer.
     assert result.content == ""
+
+
+# --- streaming ------------------------------------------------------------
+
+
+def _drain(provider: Any, request: ProviderChatRequest) -> Any:
+    async def go() -> Any:
+        end = None
+        async for event in provider.chat_stream(request):
+            if isinstance(event, StreamEnd):
+                end = event
+        return end
+
+    try:
+        return asyncio.run(go())
+    finally:
+        asyncio.run(provider.aclose())
+
+
+def test_ollama_streams_whole_tool_calls_on_the_terminal_event() -> None:
+    lines = [
+        json.dumps({"message": {"role": "assistant", "content": ""}, "done": False}),
+        json.dumps(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}
+                    ],
+                },
+                "done": False,
+            }
+        ),
+        json.dumps(
+            {"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}
+        ),
+    ]
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="\n".join(lines))
+
+    end = _drain(_ollama(handler), _request())
+
+    assert end is not None
+    assert end.finish_reason == "tool_calls"
+    assert end.tool_calls is not None
+    assert json.loads(end.tool_calls[0].arguments) == {"city": "Oslo"}
+
+
+def test_anthropic_reassembles_streamed_argument_fragments() -> None:
+    """The terminal event must carry whole calls, never a half-parsed string.
+
+    This is also the test that would have caught a silent no-op edit: the
+    StreamEnd in chat_stream once kept its original two arguments, so tool
+    calls were collected and then dropped, and every unit test still passed.
+    """
+
+    import os
+
+    from vulcan.config import AnthropicProviderConfig
+    from vulcan.providers.anthropic import AnthropicProvider
+
+    os.environ["ANTHROPIC_KEY_TEST"] = "sk-test-sentinel"
+    events = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 10}}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "get_weather",
+                "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"c'},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": 'ity": "Osl'},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": 'o"}'},
+        },
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 5},
+        },
+        {"type": "message_stop"},
+    ]
+    body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    provider = AnthropicProvider(
+        "anthropic",
+        AnthropicProviderConfig(
+            type="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key_env="ANTHROPIC_KEY_TEST",
+            timeout_seconds=2.0,
+            default_max_tokens=64,
+        ),
+        client=httpx.AsyncClient(
+            base_url="https://api.anthropic.com",
+            transport=httpx.MockTransport(handler),
+            trust_env=False,
+        ),
+    )
+    end = _drain(provider, _request())
+
+    assert end is not None
+    assert end.finish_reason == "tool_calls"
+    assert end.tool_calls is not None
+    # Only the concatenation is valid JSON; a fragment would not parse.
+    assert json.loads(end.tool_calls[0].arguments) == {"city": "Oslo"}

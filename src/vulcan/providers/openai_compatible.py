@@ -102,11 +102,28 @@ class _CompatChatResponse(BaseModel):
     usage: _CompatUsage | None = None
 
 
+class _CompatStreamToolCallFunction(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    name: str | None = None
+    # Streamed in fragments; only the concatenation is valid JSON.
+    arguments: str | None = None
+
+
+class _CompatStreamToolCall(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    index: int
+    id: str | None = None
+    function: _CompatStreamToolCallFunction | None = None
+
+
 class _CompatStreamDelta(BaseModel):
     # Vendor extensions (e.g. DeepSeek reasoning_content) are ignored, not errors.
     model_config = ConfigDict(extra="ignore", strict=True)
 
     content: str | None = None
+    tool_calls: list[_CompatStreamToolCall] | None = None
 
 
 class _CompatStreamChoice(BaseModel):
@@ -163,6 +180,41 @@ def _tool_calls(message: _CompatMessage) -> tuple[ProviderToolCall, ...] | None:
         ProviderToolCall(id=call.id, name=call.function.name, arguments=call.function.arguments)
         for call in message.tool_calls
     )
+
+
+class _ToolCallAccumulator:
+    """Reassemble indexed streaming fragments into whole calls.
+
+    OpenAI streams a call as a name on one chunk and its arguments across
+    several more, keyed by `index`. Only the concatenation parses, so nothing is
+    emitted until the stream ends.
+    """
+
+    def __init__(self) -> None:
+        self._calls: dict[int, dict[str, str]] = {}
+
+    def absorb(self, deltas: list[_CompatStreamToolCall]) -> None:
+        for delta in deltas:
+            call = self._calls.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
+            if delta.id:
+                call["id"] = delta.id
+            if delta.function is not None:
+                if delta.function.name:
+                    call["name"] = delta.function.name
+                if delta.function.arguments:
+                    call["arguments"] += delta.function.arguments
+
+    def result(self) -> tuple[ProviderToolCall, ...] | None:
+        if not self._calls:
+            return None
+        return tuple(
+            ProviderToolCall(
+                id=call["id"] or f"call_{index}",
+                name=call["name"],
+                arguments=call["arguments"] or "{}",
+            )
+            for index, call in sorted(self._calls.items())
+        )
 
 
 def _finish_reason(value: str | None) -> Literal["stop", "length", "tool_calls"] | None:
@@ -281,6 +333,7 @@ class OpenAICompatibleProvider:
         api_key = resolve_api_key(self._api_key_env)
         payload = self._payload(request, stream=True)
         finish_reason: Literal["stop", "length"] | None = None
+        accumulator = _ToolCallAccumulator()
         usage: ProviderTokenUsage | None = None
 
         try:
@@ -319,6 +372,8 @@ class OpenAICompatibleProvider:
                         finish_reason = _finish_reason(choice.finish_reason)
                     if choice.delta is not None and choice.delta.content:
                         yield StreamDelta(text=choice.delta.content)
+                    if choice.delta is not None and choice.delta.tool_calls:
+                        accumulator.absorb(choice.delta.tool_calls)
             else:
                 # The endpoint closed without [DONE]: truncated reply.
                 raise ProviderProtocolError
@@ -329,7 +384,12 @@ class OpenAICompatibleProvider:
         finally:
             await response.aclose()
 
-        yield StreamEnd(finish_reason=finish_reason, usage=usage)
+        streamed_calls = accumulator.result()
+        yield StreamEnd(
+            finish_reason="tool_calls" if streamed_calls else finish_reason,
+            usage=usage,
+            tool_calls=streamed_calls,
+        )
 
     async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:
         api_key = resolve_api_key(self._api_key_env)

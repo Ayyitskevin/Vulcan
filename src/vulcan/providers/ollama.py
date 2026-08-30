@@ -271,6 +271,7 @@ class OllamaProvider:
 
         payload = self._payload(request, stream=True)
         finish_reason: Literal["stop", "length"] | None = None
+        streamed_calls: tuple[ProviderToolCall, ...] | None = None
         usage: ProviderTokenUsage | None = None
 
         try:
@@ -297,6 +298,10 @@ class OllamaProvider:
                     raise ProviderProtocolError from exc
                 if chunk.message is not None and chunk.message.content:
                     yield StreamDelta(text=chunk.message.content)
+                if chunk.message is not None and chunk.message.tool_calls:
+                    # Collected, not yielded: a caller cannot act on half a
+                    # call, so whole calls ride the terminal event instead.
+                    streamed_calls = _tool_calls(chunk.message)
                 if chunk.done:
                     finish_reason = _finish_reason(chunk.done_reason)
                     usage = _usage(chunk.prompt_eval_count, chunk.eval_count)
@@ -311,7 +316,11 @@ class OllamaProvider:
         finally:
             await response.aclose()
 
-        yield StreamEnd(finish_reason=finish_reason, usage=usage)
+        yield StreamEnd(
+            finish_reason="tool_calls" if streamed_calls else finish_reason,
+            usage=usage,
+            tool_calls=streamed_calls,
+        )
 
     async def embed(self, request: ProviderEmbeddingRequest) -> ProviderEmbeddingResult:
         payload: dict[str, Any] = {

@@ -569,7 +569,7 @@ class Gateway:
             def chunk(
                 delta: ChunkDelta,
                 *,
-                finish_reason: Literal["stop", "length"] | None = None,
+                finish_reason: Literal["stop", "length", "tool_calls"] | None = None,
                 usage: TokenUsage | None = None,
             ) -> ChatCompletionChunk:
                 return ChatCompletionChunk(
@@ -618,7 +618,14 @@ class Gateway:
                         "chat_completed",
                         extra={"metadata": {**metadata, "output_chars": output_chars}},
                     )
-                    yield chunk(ChunkDelta(), finish_reason=event.finish_reason, usage=final_usage)
+                    # Whole tool calls ride the terminal chunk: the adapters
+                    # reassemble them so a caller never sees half an argument
+                    # string it cannot execute.
+                    yield chunk(
+                        ChunkDelta(tool_calls=_response_tool_calls(event.tool_calls)),
+                        finish_reason=event.finish_reason,
+                        usage=final_usage,
+                    )
                     completed = True
                     break
                 if not completed:
