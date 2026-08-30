@@ -37,6 +37,7 @@ from vulcan.providers.base import (
     ProviderEmbeddingResult,
     ProviderStreamEvent,
     ProviderTokenUsage,
+    ProviderToolCall,
     StreamDelta,
     StreamEnd,
 )
@@ -61,6 +62,11 @@ class _AnthropicContentBlock(BaseModel):
 
     type: str
     text: str | None = None
+    # Present only on a `tool_use` block. Anthropic sends the arguments as a
+    # decoded object; the boundary serializes it so every provider yields one shape.
+    id: str | None = None
+    name: str | None = None
+    input: dict[str, Any] | None = None
 
 
 class _AnthropicUsage(BaseModel):
@@ -110,7 +116,26 @@ class _AnthropicStreamEvent(BaseModel):
     error: _AnthropicStreamError | None = None
 
 
-def _finish_reason(stop_reason: str | None) -> Literal["stop", "length"] | None:
+def _tool_calls(
+    blocks: list[_AnthropicContentBlock],
+) -> tuple[ProviderToolCall, ...] | None:
+    """Lift `tool_use` blocks out of the content list into the shared shape."""
+
+    calls = [
+        ProviderToolCall(
+            id=block.id,
+            name=block.name,
+            arguments=json.dumps(block.input or {}, separators=(",", ":"), sort_keys=True),
+        )
+        for block in blocks
+        if block.type == "tool_use" and block.id is not None and block.name is not None
+    ]
+    return tuple(calls) or None
+
+
+def _finish_reason(stop_reason: str | None) -> Literal["stop", "length", "tool_calls"] | None:
+    if stop_reason == "tool_use":
+        return "tool_calls"
     if stop_reason in {"end_turn", "stop_sequence"}:
         return "stop"
     if stop_reason == "max_tokens":
@@ -134,21 +159,48 @@ def _usage(parsed: _AnthropicUsage | None) -> ProviderTokenUsage | None:
     return ProviderTokenUsage(prompt_tokens=input_tokens, completion_tokens=output_tokens)
 
 
+# Extended-thinking blocks arrive intermittently beside a tool_use answer.
+# They are known and skipped; they are not content and must never be joined
+# into one.
+_DISCARDED_BLOCK_TYPES: frozenset[str] = frozenset({"thinking", "redacted_thinking"})
+
+_TOOL_CHOICE: dict[str, str] = {"auto": "auto", "required": "any", "none": "none"}
+
+
 def _translate_messages(
     request: ProviderChatRequest,
-) -> tuple[str | None, list[dict[str, str]]]:
-    """Split system text out and merge turns into a strict user/assistant alternation."""
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Split system text out and merge turns into a strict user/assistant alternation.
+
+    A tool result is not a role in Anthropic's protocol: it is a `tool_result`
+    content block inside a *user* turn, naming the `tool_use` it answers. It is
+    therefore never merged into a neighbouring text turn.
+    """
 
     system_parts = [message.content for message in request.messages if message.role == "system"]
-    turns: list[dict[str, str]] = []
+    turns: list[dict[str, Any]] = []
     for message in request.messages:
         if message.role == "system":
+            continue
+        if message.role == "tool":
+            turns.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": message.tool_call_id,
+                            "content": message.content,
+                        }
+                    ],
+                }
+            )
             continue
         if not message.content.strip():
             # Anthropic 400s on empty text blocks; refuse locally with the
             # same treatment as the other translation guards, before any I/O.
             raise UnsupportedCapabilityError("empty_message_content")
-        if turns and turns[-1]["role"] == message.role:
+        if turns and turns[-1]["role"] == message.role and isinstance(turns[-1]["content"], str):
             turns[-1]["content"] = f"{turns[-1]['content']}\n\n{message.content}"
         else:
             turns.append({"role": message.role, "content": message.content})
@@ -192,6 +244,18 @@ class AnthropicProvider:
         }
         if system is not None:
             payload["system"] = system
+        if request.tools:
+            # Anthropic names the JSON Schema `input_schema`, not `parameters`.
+            payload["tools"] = [
+                {
+                    "name": tool.name,
+                    **({"description": tool.description} if tool.description else {}),
+                    "input_schema": tool.parameters or {"type": "object"},
+                }
+                for tool in request.tools
+            ]
+            if request.tool_choice is not None:
+                payload["tool_choice"] = {"type": _TOOL_CHOICE[request.tool_choice]}
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if stream:
@@ -223,18 +287,30 @@ class AnthropicProvider:
         except httpx.RequestError as exc:
             raise ProviderUnavailableError from exc
 
-        # Vulcan requests no tools, so only text blocks are a valid reply;
-        # silently dropping an unknown block would misreport partial content.
+        # Text and tool_use are the answer; thinking is deliberately discarded,
+        # never concatenated, because reasoning is not an answer here (the same
+        # rule the OpenAI-compatible adapter applies to reasoning_content). A
+        # genuinely unknown block is still a protocol error: silently dropping
+        # one would misreport partial content as a complete answer.
         texts: list[str] = []
         for block in parsed.content:
-            if block.type != "text" or block.text is None:
-                raise ProviderProtocolError
-            texts.append(block.text)
+            if block.type == "text" and block.text is not None:
+                texts.append(block.text)
+                continue
+            if block.type == "tool_use":
+                if block.id is None or block.name is None:
+                    raise ProviderProtocolError
+                continue
+            if block.type in _DISCARDED_BLOCK_TYPES:
+                continue
+            raise ProviderProtocolError
 
+        calls = _tool_calls(parsed.content)
         return ProviderChatResult(
             content="".join(texts),
-            finish_reason=_finish_reason(parsed.stop_reason),
+            finish_reason="tool_calls" if calls else _finish_reason(parsed.stop_reason),
             usage=_usage(parsed.usage),
+            tool_calls=calls,
         )
 
     async def chat_stream(self, request: ProviderChatRequest) -> AsyncIterator[ProviderStreamEvent]:

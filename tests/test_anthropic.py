@@ -256,7 +256,7 @@ def test_temperature_at_most_one_passes_through() -> None:
         ("end_turn", "stop"),
         ("stop_sequence", "stop"),
         ("max_tokens", "length"),
-        ("tool_use", None),
+        ("tool_use", "tool_calls"),
         (None, None),
     ],
 )
@@ -297,9 +297,13 @@ def test_non_text_content_block_is_a_protocol_error() -> None:
         return httpx.Response(
             200,
             json=_success_body(
+                # `tool_use` was this test's example of an invalid block until
+                # tool calling landed and made it a legitimate reply. The rule
+                # this guards — an unknown block is never silently dropped —
+                # needs a type Vulcan genuinely does not ask for.
                 content=[
                     {"type": "text", "text": "before"},
-                    {"type": "tool_use", "id": "t1", "name": "x", "input": {}},
+                    {"type": "a_block_type_anthropic_does_not_send"},
                 ]
             ),
         )

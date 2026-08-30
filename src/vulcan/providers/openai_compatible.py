@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from vulcan.config import OpenAICompatibleProviderConfig
 from vulcan.errors import (
@@ -28,8 +28,10 @@ from vulcan.providers.base import (
     ProviderEmbeddingRequest,
     ProviderEmbeddingResult,
     ProviderEmbeddingUsage,
+    ProviderMessage,
     ProviderStreamEvent,
     ProviderTokenUsage,
+    ProviderToolCall,
     StreamDelta,
     StreamEnd,
 )
@@ -48,11 +50,35 @@ from vulcan.readiness import RuntimeProbe
 SSE_DONE = "[DONE]"
 
 
+class _CompatToolCallFunction(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    name: str
+    arguments: str
+
+
+class _CompatToolCall(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    id: str
+    function: _CompatToolCallFunction
+
+
 class _CompatMessage(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     role: Literal["assistant"]
-    content: str
+    # Absent ONLY for a tool-only reply, which carries no prose. A response with
+    # neither content nor tool calls stays a protocol error: reasoning is not a
+    # fallback answer, and an empty reply must not read as a successful one.
+    content: str | None = None
+    tool_calls: list[_CompatToolCall] | None = None
+
+    @model_validator(mode="after")
+    def require_content_or_tool_calls(self) -> Self:
+        if self.content is None and not self.tool_calls:
+            raise ValueError("assistant message has neither content nor tool_calls")
+        return self
 
 
 class _CompatChoice(BaseModel):
@@ -121,7 +147,27 @@ class _CompatEmbeddingsResponse(BaseModel):
     usage: _CompatEmbeddingUsage | None = None
 
 
-def _finish_reason(value: str | None) -> Literal["stop", "length"] | None:
+def _wire_message(message: ProviderMessage) -> dict[str, Any]:
+    wire: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.tool_call_id is not None:
+        wire["tool_call_id"] = message.tool_call_id
+    return wire
+
+
+def _tool_calls(message: _CompatMessage) -> tuple[ProviderToolCall, ...] | None:
+    """OpenAI-shaped calls already carry an id and a JSON-string argument."""
+
+    if not message.tool_calls:
+        return None
+    return tuple(
+        ProviderToolCall(id=call.id, name=call.function.name, arguments=call.function.arguments)
+        for call in message.tool_calls
+    )
+
+
+def _finish_reason(value: str | None) -> Literal["stop", "length", "tool_calls"] | None:
+    if value == "tool_calls":
+        return "tool_calls"
     if value == "stop":
         return "stop"
     if value == "length":
@@ -167,11 +213,23 @@ class OpenAICompatibleProvider:
     def _payload(self, request: ProviderChatRequest, *, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.provider_model,
-            "messages": [
-                {"role": message.role, "content": message.content} for message in request.messages
-            ],
+            "messages": [_wire_message(message) for message in request.messages],
             "stream": stream,
         }
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        **({"description": tool.description} if tool.description else {}),
+                        **({"parameters": tool.parameters} if tool.parameters is not None else {}),
+                    },
+                }
+                for tool in request.tools
+            ]
+            if request.tool_choice is not None:
+                payload["tool_choice"] = request.tool_choice
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.max_tokens is not None:
@@ -204,10 +262,12 @@ class OpenAICompatibleProvider:
             raise ProviderUnavailableError from exc
 
         choice = parsed.choices[0]
+        calls = _tool_calls(choice.message)
         return ProviderChatResult(
-            content=choice.message.content,
-            finish_reason=_finish_reason(choice.finish_reason),
+            content=choice.message.content or "",
+            finish_reason="tool_calls" if calls else _finish_reason(choice.finish_reason),
             usage=_usage(parsed.usage),
+            tool_calls=calls,
         )
 
     async def chat_stream(self, request: ProviderChatRequest) -> AsyncIterator[ProviderStreamEvent]:

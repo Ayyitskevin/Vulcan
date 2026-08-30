@@ -193,7 +193,16 @@ def test_vendor_base_url_path_is_preserved() -> None:
 
 @pytest.mark.parametrize(
     ("finish_reason", "expected"),
-    [("stop", "stop"), ("length", "length"), ("tool_calls", None), (None, None)],
+    [
+        ("stop", "stop"),
+        ("length", "length"),
+        # Mapped to None until tool calling landed; the reason is now carried
+        # through, because a caller must be able to tell a finished answer from
+        # a paused turn awaiting tool results.
+        ("tool_calls", "tool_calls"),
+        (None, None),
+        ("content_filter", None),
+    ],
 )
 def test_finish_reason_mapping(finish_reason: str | None, expected: str | None) -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
