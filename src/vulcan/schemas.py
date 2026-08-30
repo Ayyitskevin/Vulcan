@@ -118,6 +118,10 @@ class ChatCompletionRequest(StrictSchema):
     messages: tuple[ChatMessage, ...] = Field(min_length=1, max_length=64)
     temperature: float | None = Field(default=None, strict=True, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, strict=True, ge=1, le=32768)
+    # OpenAI replaced `max_tokens` with `max_completion_tokens`; modern clients
+    # send the newer name. Both are accepted and mean the same cap, but sending
+    # both is refused rather than silently preferring one.
+    max_completion_tokens: int | None = Field(default=None, strict=True, ge=1, le=32768)
     stream: bool = Field(default=False, strict=True)
     tools: tuple[ToolDefinition, ...] | None = Field(default=None, max_length=64)
     tool_choice: Literal["auto", "none", "required"] | None = None
@@ -125,6 +129,12 @@ class ChatCompletionRequest(StrictSchema):
     # Optional caller attribution for /v1/usage. Operator-chosen, non-secret,
     # never forwarded upstream (pinned by tests/test_seat.py sentinels).
     seat: str | None = Field(default=None, strict=True, pattern=SEAT_PATTERN)
+
+    @property
+    def output_token_cap(self) -> int | None:
+        """The requested cap under either spelling; exactly one may be set."""
+
+        return self.max_tokens if self.max_tokens is not None else self.max_completion_tokens
 
     @model_validator(mode="after")
     def require_user_message_and_bounded_input(self) -> Self:
@@ -137,6 +147,8 @@ class ChatCompletionRequest(StrictSchema):
                 raise ValueError("a tool message requires tool_call_id")
             if message.role is not MessageRole.TOOL and message.tool_call_id is not None:
                 raise ValueError("tool_call_id is only valid on a tool message")
+        if self.max_tokens is not None and self.max_completion_tokens is not None:
+            raise ValueError("send max_tokens or max_completion_tokens, not both")
         if self.tool_choice is not None and not self.tools:
             raise ValueError("tool_choice requires tools")
         if self.tools is not None:

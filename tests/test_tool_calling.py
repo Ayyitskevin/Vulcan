@@ -696,3 +696,20 @@ def test_anthropic_refuses_schemaless_json_rather_than_approximating_it() -> Non
             )
     finally:
         asyncio.run(provider.aclose())
+
+
+def test_either_output_token_spelling_is_accepted_but_not_both() -> None:
+    """OpenAI replaced max_tokens with max_completion_tokens; clients send both names.
+
+    buzz-agent sends the newer one, which Vulcan refused outright — the whole
+    reason a local seat could not route through the gateway.
+    """
+
+    assert ChatCompletionRequest.model_validate(_payload(max_tokens=64)).output_token_cap == 64
+    assert (
+        ChatCompletionRequest.model_validate(_payload(max_completion_tokens=64)).output_token_cap
+        == 64
+    )
+    assert ChatCompletionRequest.model_validate(_payload()).output_token_cap is None
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(_payload(max_tokens=64, max_completion_tokens=64))

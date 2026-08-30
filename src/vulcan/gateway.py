@@ -485,7 +485,7 @@ class Gateway:
                 for message in request.messages
             ),
             temperature=request.temperature,
-            max_tokens=request.max_tokens,
+            max_tokens=request.output_token_cap,
             keep_alive=model.keep_alive,
             tools=tuple(
                 ProviderTool(
