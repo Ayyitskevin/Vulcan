@@ -349,13 +349,23 @@ unit + layout convention).
 
 ## 10. Out of scope until the operator explicitly asks
 
-Chat UI, agents/tool-calling, images/multimodal, model
-download/pull/management, auto-routing or "best model" selection, retries and
-fallback chains, circuit breakers, load balancing, multi-user auth/state,
-billing/cost tracking beyond `/v1/usage` counters, credential storage,
-hosted-provider auto-probing, per-vendor adapters, external telemetry, and a
-client SDK (revisit when at least two consumers exist). If a change seems to
-require one of these, stop and ask instead of building it.
+Chat UI, images/multimodal, model download/pull/management, auto-routing or
+"best model" selection, retries and fallback chains, circuit breakers, load
+balancing, multi-user auth/state, billing/cost tracking beyond `/v1/usage`
+counters, credential storage, hosted-provider auto-probing, per-vendor
+adapters, external telemetry, and a client SDK (revisit when at least two
+consumers exist). If a change seems to require one of these, stop and ask
+instead of building it.
+
+**Tool-calling and structured output left this list on 2026-08-29**, on the
+operator's explicit request — which is the condition this section names. They
+are not feature breadth: refusing `tools` meant an agent harness could not use
+the gateway at all, so every local seat was routed directly at Ollama and its
+turns were invisible to the ledger. Serving them is what makes the metering
+real. The invariants above are unchanged: still loopback-only, still one
+provider per alias, still no fallback or retries, still strict — an unknown
+top-level field is still `extra_forbidden`, and unknown provider content blocks
+are still protocol errors.
 
 ---
 

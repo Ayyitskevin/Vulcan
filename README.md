@@ -644,8 +644,10 @@ live inventory; hosted providers always report `unchecked` without any probe.
 
 No auth layer, multi-user state, telemetry, billing, or cost tracking — the
 per-seat budgets above are request/token caps enforced against the local
-ledger, not billing or money. No model management or downloads, tools, images,
-agents, UI, retries, fallback, or credential storage. Hosted providers
+ledger, not billing or money. No model management or downloads, images, agents,
+UI, retries, fallback, or credential storage. Tool-calling and structured
+output ARE served (since 2026-08-29) — they are what makes an agent harness
+meterable rather than a reason to route around the gateway. Hosted providers
 are never probed for health or model catalogues; a hosted model's availability is
 learned when a request uses it. A shared SDK should wait until at least two
 consumers exist.

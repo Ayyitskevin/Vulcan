@@ -358,16 +358,23 @@ multi-provider operator can tell which upstream failed.
 - Anthropic accepts `temperature` 0–1 while the Vulcan contract allows 0–2;
   values above 1 are rejected locally (422 `unsupported_capability`) rather
   than silently clamped.
-- Response: `content` must contain only `text` blocks (Vulcan requests no
-  tools); any other block type is a protocol error. `end_turn`/`stop_sequence`
-  → `stop`, `max_tokens` → `length`, anything else → `null`. Usage is reported
-  only when both `input_tokens` and `output_tokens` are present.
+- Tool calls use Anthropic's own vocabulary: `input_schema` rather than
+  OpenAI's `parameters`, a `tool_choice` object where the contract's
+  `"required"` becomes `"any"`, and a tool result returned as a `tool_result`
+  block inside a *user* turn naming the `tool_use` it answers.
+- Response: `content` may hold `text` and `tool_use` blocks. `thinking` and
+  `redacted_thinking` arrive intermittently beside a tool answer and are
+  DISCARDED, never concatenated into content — reasoning is not a fallback for
+  an empty answer. Any other block type is still a protocol error.
+  `tool_use` → `tool_calls`, `end_turn`/`stop_sequence` → `stop`,
+  `max_tokens` → `length`, anything else → `null`. Usage is reported only when
+  both `input_tokens` and `output_tokens` are present.
 - `anthropic-version: 2023-06-01` is pinned in code; it is a wire-format
   version, not a model choice.
 
 **OpenAI-compatible** (POST `{base_url}/chat/completions`):
 
-- Messages pass through role/content verbatim; `stream: false` is always sent.
+- Messages pass through role/content verbatim; `stream` reflects the request.
 - The first choice's `message.content` must be a string; `finish_reason`
   `stop`/`length` map through, anything else → `null`. Usage requires both
   `prompt_tokens` and `completion_tokens`, non-negative.
