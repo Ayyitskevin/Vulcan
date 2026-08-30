@@ -85,6 +85,34 @@ class ToolCall(StrictSchema):
     function: ToolCallFunction
 
 
+class JsonSchemaFormat(StrictSchema):
+    """A named strict JSON Schema the reply must satisfy."""
+
+    name: str = Field(strict=True, pattern=TOOL_NAME_PATTERN)
+    schema_: dict[str, Any] = Field(alias="schema")
+    strict: bool = Field(default=True, strict=True)
+
+
+class ResponseFormat(StrictSchema):
+    """Structured-output request, in the OpenAI chat-completions vocabulary.
+
+    Providers name this differently — Ollama calls it `format`, Anthropic
+    `output_config` — and each adapter translates. `json_object` asks only for
+    valid JSON; `json_schema` binds a shape.
+    """
+
+    type: Literal["json_object", "json_schema"]
+    json_schema: JsonSchemaFormat | None = None
+
+    @model_validator(mode="after")
+    def schema_required_for_json_schema(self) -> Self:
+        if self.type == "json_schema" and self.json_schema is None:
+            raise ValueError("response_format json_schema requires a json_schema object")
+        if self.type == "json_object" and self.json_schema is not None:
+            raise ValueError("json_schema is only valid when type is json_schema")
+        return self
+
+
 class ChatCompletionRequest(StrictSchema):
     model: str = Field(strict=True, pattern=PUBLIC_MODEL_PATTERN)
     messages: tuple[ChatMessage, ...] = Field(min_length=1, max_length=64)
@@ -93,6 +121,7 @@ class ChatCompletionRequest(StrictSchema):
     stream: bool = Field(default=False, strict=True)
     tools: tuple[ToolDefinition, ...] | None = Field(default=None, max_length=64)
     tool_choice: Literal["auto", "none", "required"] | None = None
+    response_format: ResponseFormat | None = None
     # Optional caller attribution for /v1/usage. Operator-chosen, non-secret,
     # never forwarded upstream (pinned by tests/test_seat.py sentinels).
     seat: str | None = Field(default=None, strict=True, pattern=SEAT_PATTERN)

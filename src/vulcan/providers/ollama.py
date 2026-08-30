@@ -185,6 +185,9 @@ class OllamaProvider:
             "messages": [_wire_message(message) for message in request.messages],
             "stream": stream,
         }
+        if request.response_format is not None:
+            # Ollama takes the schema itself, or the string "json" for any shape.
+            payload["format"] = request.response_format.json_schema or "json"
         if request.tools:
             payload["tools"] = [
                 {

@@ -268,6 +268,16 @@ class OpenAICompatibleProvider:
             "messages": [_wire_message(message) for message in request.messages],
             "stream": stream,
         }
+        if request.response_format is not None:
+            schema = request.response_format.json_schema
+            payload["response_format"] = (
+                {
+                    "type": "json_schema",
+                    "json_schema": {"name": "response", "schema": schema, "strict": True},
+                }
+                if schema is not None
+                else {"type": "json_object"}
+            )
         if request.tools:
             payload["tools"] = [
                 {

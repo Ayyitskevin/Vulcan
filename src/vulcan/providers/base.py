@@ -25,6 +25,11 @@ class ProviderToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderResponseFormat:
+    json_schema: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderTool:
     name: str
     description: str | None
@@ -47,6 +52,9 @@ class ProviderChatRequest:
     keep_alive: str | None = None
     tools: tuple[ProviderTool, ...] | None = None
     tool_choice: Literal["auto", "none", "required"] | None = None
+    # None means unconstrained; a schema of None with json_object means "valid
+    # JSON, any shape". Each adapter translates into its provider's vocabulary.
+    response_format: ProviderResponseFormat | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,6 +26,7 @@ from vulcan.providers.base import (
     ProviderChatRequest,
     ProviderEmbeddingRequest,
     ProviderMessage,
+    ProviderResponseFormat,
     ProviderStreamEvent,
     ProviderTool,
     ProviderToolCall,
@@ -497,6 +498,15 @@ class Gateway:
             if request.tools
             else None,
             tool_choice=request.tool_choice,
+            response_format=ProviderResponseFormat(
+                json_schema=(
+                    request.response_format.json_schema.schema_
+                    if request.response_format.json_schema is not None
+                    else None
+                )
+            )
+            if request.response_format is not None
+            else None,
         )
 
     def _handle_failure(

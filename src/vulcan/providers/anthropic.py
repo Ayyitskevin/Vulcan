@@ -247,6 +247,15 @@ class AnthropicProvider:
         }
         if system is not None:
             payload["system"] = system
+        if request.response_format is not None:
+            schema = request.response_format.json_schema
+            if schema is None:
+                # Anthropic has no "any valid JSON" mode; refuse rather than
+                # approximate it with a prompt instruction.
+                raise UnsupportedCapabilityError("json_object_without_schema")
+            # `output_config.format` takes no `name`: the API rejects it with
+            # "Extra inputs are not permitted" (verified live 2026-08-29).
+            payload["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
         if request.tools:
             # Anthropic names the JSON Schema `input_schema`, not `parameters`.
             payload["tools"] = [

@@ -20,6 +20,7 @@ from vulcan.config import OllamaProviderConfig
 from vulcan.providers.base import (
     ProviderChatRequest,
     ProviderMessage,
+    ProviderResponseFormat,
     ProviderTool,
     StreamEnd,
 )
@@ -572,3 +573,126 @@ def test_anthropic_reassembles_streamed_argument_fragments() -> None:
     assert end.tool_calls is not None
     # Only the concatenation is valid JSON; a fragment would not parse.
     assert json.loads(end.tool_calls[0].arguments) == {"city": "Oslo"}
+
+
+# --- structured output ----------------------------------------------------
+
+SCHEMA: dict[str, Any] = {"type": "object", "properties": {"city": {"type": "string"}}}
+
+
+def test_response_format_requires_a_schema_when_it_names_one() -> None:
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(_payload(response_format={"type": "json_schema"}))
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(
+            _payload(
+                response_format={
+                    "type": "json_object",
+                    "json_schema": {"name": "x", "schema": SCHEMA},
+                }
+            )
+        )
+
+
+def test_ollama_takes_the_schema_as_format() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return _reply(content='{"city":"Oslo"}')
+
+    _run(handler, _request(response_format=ProviderResponseFormat(json_schema=SCHEMA)))
+    assert seen["format"] == SCHEMA
+
+
+def test_ollama_json_object_without_a_schema_asks_for_json() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return _reply(content="{}")
+
+    _run(handler, _request(response_format=ProviderResponseFormat(json_schema=None)))
+    assert seen["format"] == "json"
+
+
+def test_anthropic_uses_output_config_and_sends_no_name() -> None:
+    """Verified live: the API refuses `name` with "Extra inputs are not permitted"."""
+
+    import os
+
+    from vulcan.config import AnthropicProviderConfig
+    from vulcan.providers.anthropic import AnthropicProvider
+
+    os.environ["ANTHROPIC_KEY_TEST"] = "sk-test-sentinel"
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "role": "assistant",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": '{"city":"Oslo"}'}],
+            },
+        )
+
+    provider = AnthropicProvider(
+        "anthropic",
+        AnthropicProviderConfig(
+            type="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key_env="ANTHROPIC_KEY_TEST",
+            timeout_seconds=2.0,
+            default_max_tokens=64,
+        ),
+        client=httpx.AsyncClient(
+            base_url="https://api.anthropic.com",
+            transport=httpx.MockTransport(handler),
+            trust_env=False,
+        ),
+    )
+    try:
+        asyncio.run(
+            provider.chat(_request(response_format=ProviderResponseFormat(json_schema=SCHEMA)))
+        )
+    finally:
+        asyncio.run(provider.aclose())
+
+    assert seen["output_config"] == {"format": {"type": "json_schema", "schema": SCHEMA}}
+    assert "name" not in seen["output_config"]["format"]
+
+
+def test_anthropic_refuses_schemaless_json_rather_than_approximating_it() -> None:
+    """Anthropic has no "any valid JSON" mode; a prompt hint would be a lie."""
+
+    import os
+
+    from vulcan.config import AnthropicProviderConfig
+    from vulcan.errors import UnsupportedCapabilityError
+    from vulcan.providers.anthropic import AnthropicProvider
+
+    os.environ["ANTHROPIC_KEY_TEST"] = "sk-test-sentinel"
+    provider = AnthropicProvider(
+        "anthropic",
+        AnthropicProviderConfig(
+            type="anthropic",
+            base_url="https://api.anthropic.com",
+            api_key_env="ANTHROPIC_KEY_TEST",
+            timeout_seconds=2.0,
+            default_max_tokens=64,
+        ),
+        client=httpx.AsyncClient(
+            base_url="https://api.anthropic.com",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+            trust_env=False,
+        ),
+    )
+    try:
+        with pytest.raises(UnsupportedCapabilityError):
+            asyncio.run(
+                provider.chat(_request(response_format=ProviderResponseFormat(json_schema=None)))
+            )
+    finally:
+        asyncio.run(provider.aclose())
