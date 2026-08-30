@@ -24,8 +24,10 @@ from vulcan.providers.base import (
     ProviderEmbeddingRequest,
     ProviderEmbeddingResult,
     ProviderEmbeddingUsage,
+    ProviderMessage,
     ProviderStreamEvent,
     ProviderTokenUsage,
+    ProviderToolCall,
     StreamDelta,
     StreamEnd,
 )
@@ -40,11 +42,28 @@ from vulcan.providers.http import (
 from vulcan.readiness import RuntimeProbe
 
 
+class _OllamaToolCallFunction(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    name: str
+    # Ollama returns already-decoded arguments; OpenAI returns a JSON string.
+    # Normalized to a string at the boundary so callers see one shape.
+    arguments: dict[str, Any] | str
+
+
+class _OllamaToolCall(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    function: _OllamaToolCallFunction
+
+
 class _OllamaMessage(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     role: Literal["assistant"]
     content: str
+    # A list, not a tuple: this model is strict and parses JSON, which has no tuples.
+    tool_calls: list[_OllamaToolCall] | None = None
 
 
 class _OllamaChatResponse(BaseModel):
@@ -65,6 +84,39 @@ class _OllamaStreamChunk(BaseModel):
     done_reason: str | None = None
     prompt_eval_count: int | None = None
     eval_count: int | None = None
+
+
+def _wire_message(message: ProviderMessage) -> dict[str, Any]:
+    wire: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.tool_call_id is not None:
+        # Ollama keys a tool result by name rather than by call id.
+        wire["tool_call_id"] = message.tool_call_id
+    return wire
+
+
+def _tool_calls(message: _OllamaMessage) -> tuple[ProviderToolCall, ...] | None:
+    """Normalize Ollama tool calls, which carry no id, into the shared shape.
+
+    Ollama emits neither a call id nor a stable ordering key, so an index-derived
+    id is synthesized. It is positional and local to this response — a caller
+    matching a tool result back to a call must echo exactly what it received.
+    """
+
+    if not message.tool_calls:
+        return None
+    calls: list[ProviderToolCall] = []
+    for index, call in enumerate(message.tool_calls):
+        arguments = call.function.arguments
+        calls.append(
+            ProviderToolCall(
+                id=f"call_{index}",
+                name=call.function.name,
+                arguments=arguments
+                if isinstance(arguments, str)
+                else json.dumps(arguments, separators=(",", ":"), sort_keys=True),
+            )
+        )
+    return tuple(calls)
 
 
 def _finish_reason(done_reason: str | None) -> Literal["stop", "length"] | None:
@@ -130,11 +182,21 @@ class OllamaProvider:
     def _payload(request: ProviderChatRequest, *, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.provider_model,
-            "messages": [
-                {"role": message.role, "content": message.content} for message in request.messages
-            ],
+            "messages": [_wire_message(message) for message in request.messages],
             "stream": stream,
         }
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        **({"description": tool.description} if tool.description else {}),
+                        **({"parameters": tool.parameters} if tool.parameters is not None else {}),
+                    },
+                }
+                for tool in request.tools
+            ]
         options: dict[str, float | int] = {}
         if request.temperature is not None:
             options["temperature"] = request.temperature
@@ -192,10 +254,12 @@ class OllamaProvider:
         if not parsed.done:
             raise ProviderProtocolError
 
+        calls = _tool_calls(parsed.message)
         return ProviderChatResult(
             content=parsed.message.content,
-            finish_reason=_finish_reason(parsed.done_reason),
+            finish_reason="tool_calls" if calls else _finish_reason(parsed.done_reason),
             usage=_usage(parsed.prompt_eval_count, parsed.eval_count),
+            tool_calls=calls,
         )
 
     async def chat_stream(self, request: ProviderChatRequest) -> AsyncIterator[ProviderStreamEvent]:

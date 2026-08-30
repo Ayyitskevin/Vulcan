@@ -56,7 +56,9 @@ def test_chat_request_rejects_invalid_public_model_ids(model: str) -> None:
 
 def test_chat_request_rejects_unknown_top_level_fields() -> None:
     payload = _chat_payload()
-    payload["tools"] = []
+    # `tools` became a real field when tool calling landed; this test guards
+    # extra="forbid", so it needs a name the contract genuinely does not have.
+    payload["frequency_penalty"] = 0.5
 
     with pytest.raises(ValidationError) as raised:
         ChatCompletionRequest.model_validate(payload)

@@ -27,6 +27,8 @@ from vulcan.providers.base import (
     ProviderEmbeddingRequest,
     ProviderMessage,
     ProviderStreamEvent,
+    ProviderTool,
+    ProviderToolCall,
     StreamDelta,
 )
 from vulcan.readiness import (
@@ -51,6 +53,8 @@ from vulcan.schemas import (
     EmbeddingsResponse,
     EmbeddingUsage,
     TokenUsage,
+    ToolCall,
+    ToolCallFunction,
 )
 from vulcan.usage import UsageRecorder, UsageSnapshot
 
@@ -108,6 +112,19 @@ class _RequestScope:
                 reservation_day=self.reservation,
             )
         self.settled = True
+
+
+def _response_tool_calls(
+    calls: tuple[ProviderToolCall, ...] | None,
+) -> tuple[ToolCall, ...] | None:
+    """Translate provider tool calls into the public response shape."""
+
+    if not calls:
+        return None
+    return tuple(
+        ToolCall(id=call.id, function=ToolCallFunction(name=call.name, arguments=call.arguments))
+        for call in calls
+    )
 
 
 class Gateway:
@@ -426,7 +443,10 @@ class Gateway:
                 provider=scope.provider.provider_id,
                 choices=(
                     ChatChoice(
-                        message=AssistantMessage(content=result.content),
+                        message=AssistantMessage(
+                            content=result.content,
+                            tool_calls=_response_tool_calls(result.tool_calls),
+                        ),
                         finish_reason=result.finish_reason,
                     ),
                 ),
@@ -456,12 +476,27 @@ class Gateway:
         return ProviderChatRequest(
             provider_model=model.provider_model,
             messages=tuple(
-                ProviderMessage(role=message.role.value, content=message.content)
+                ProviderMessage(
+                    role=message.role.value,
+                    content=message.content,
+                    tool_call_id=message.tool_call_id,
+                )
                 for message in request.messages
             ),
             temperature=request.temperature,
             max_tokens=request.max_tokens,
             keep_alive=model.keep_alive,
+            tools=tuple(
+                ProviderTool(
+                    name=definition.function.name,
+                    description=definition.function.description,
+                    parameters=definition.function.parameters,
+                )
+                for definition in request.tools
+            )
+            if request.tools
+            else None,
+            tool_choice=request.tool_choice,
         )
 
     def _handle_failure(

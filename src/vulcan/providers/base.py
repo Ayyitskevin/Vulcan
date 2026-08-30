@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from vulcan.readiness import RuntimeProbe
 
@@ -12,9 +12,30 @@ ProviderType = Literal["ollama", "anthropic", "openai_compatible", "deterministi
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderToolCall:
+    """One model-requested call, carried verbatim across the boundary.
+
+    ``arguments`` stays the provider's own JSON string. Vulcan brokers the call
+    and does not parse the caller's contract with its tools.
+    """
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderTool:
+    name: str
+    description: str | None
+    parameters: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderMessage:
-    role: Literal["system", "user", "assistant"]
+    role: Literal["system", "user", "assistant", "tool"]
     content: str
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +45,8 @@ class ProviderChatRequest:
     temperature: float | None
     max_tokens: int | None
     keep_alive: str | None = None
+    tools: tuple[ProviderTool, ...] | None = None
+    tool_choice: Literal["auto", "none", "required"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,8 +58,9 @@ class ProviderTokenUsage:
 @dataclass(frozen=True, slots=True)
 class ProviderChatResult:
     content: str
-    finish_reason: Literal["stop", "length"] | None
+    finish_reason: Literal["stop", "length", "tool_calls"] | None
     usage: ProviderTokenUsage | None = None
+    tool_calls: tuple[ProviderToolCall, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +78,12 @@ class StreamEnd:
     ends without it is treated as a truncated (protocol-error) response.
     """
 
-    finish_reason: Literal["stop", "length"] | None
+    finish_reason: Literal["stop", "length", "tool_calls"] | None
     usage: ProviderTokenUsage | None = None
+    # Tool calls arrive whole on the terminal event rather than as partial
+    # deltas: a half-streamed arguments string is not something a caller can
+    # execute, and reassembling one is the adapter's job, not the caller's.
+    tool_calls: tuple[ProviderToolCall, ...] | None = None
 
 
 ProviderStreamEvent = StreamDelta | StreamEnd

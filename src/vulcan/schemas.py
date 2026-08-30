@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from vulcan.config import PROVIDER_ID_PATTERN, PUBLIC_MODEL_PATTERN, SEAT_PATTERN, Capability
 
@@ -28,11 +36,14 @@ class MessageRole(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
 
 
 class ChatMessage(StrictSchema):
     role: MessageRole
     content: str = Field(strict=True, min_length=1, max_length=32768)
+    # Set only on a tool result, naming the assistant tool call it answers.
+    tool_call_id: str | None = Field(default=None, strict=True, max_length=128)
 
     @field_validator("content")
     @classmethod
@@ -42,12 +53,46 @@ class ChatMessage(StrictSchema):
         return value
 
 
+TOOL_NAME_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+
+
+class ToolFunction(StrictSchema):
+    """A callable the caller is willing to execute on the model's behalf.
+
+    ``parameters`` is a JSON Schema object passed to the provider unchanged. It
+    is bounded but not interpreted here: Vulcan brokers the call, it does not
+    validate the caller's own contract with its tools.
+    """
+
+    name: str = Field(strict=True, pattern=TOOL_NAME_PATTERN)
+    description: str | None = Field(default=None, strict=True, max_length=1024)
+    parameters: dict[str, Any] | None = None
+
+
+class ToolDefinition(StrictSchema):
+    type: Literal["function"] = "function"
+    function: ToolFunction
+
+
+class ToolCallFunction(StrictSchema):
+    name: str = Field(strict=True, pattern=TOOL_NAME_PATTERN)
+    arguments: str = Field(strict=True, max_length=32768)
+
+
+class ToolCall(StrictSchema):
+    id: str = Field(strict=True, min_length=1, max_length=128)
+    type: Literal["function"] = "function"
+    function: ToolCallFunction
+
+
 class ChatCompletionRequest(StrictSchema):
     model: str = Field(strict=True, pattern=PUBLIC_MODEL_PATTERN)
     messages: tuple[ChatMessage, ...] = Field(min_length=1, max_length=64)
     temperature: float | None = Field(default=None, strict=True, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, strict=True, ge=1, le=32768)
     stream: bool = Field(default=False, strict=True)
+    tools: tuple[ToolDefinition, ...] | None = Field(default=None, max_length=64)
+    tool_choice: Literal["auto", "none", "required"] | None = None
     # Optional caller attribution for /v1/usage. Operator-chosen, non-secret,
     # never forwarded upstream (pinned by tests/test_seat.py sentinels).
     seat: str | None = Field(default=None, strict=True, pattern=SEAT_PATTERN)
@@ -58,6 +103,17 @@ class ChatCompletionRequest(StrictSchema):
             raise ValueError("at least one user message is required")
         if sum(len(message.content) for message in self.messages) > 65536:
             raise ValueError("combined message content exceeds 65536 characters")
+        for message in self.messages:
+            if message.role is MessageRole.TOOL and message.tool_call_id is None:
+                raise ValueError("a tool message requires tool_call_id")
+            if message.role is not MessageRole.TOOL and message.tool_call_id is not None:
+                raise ValueError("tool_call_id is only valid on a tool message")
+        if self.tool_choice is not None and not self.tools:
+            raise ValueError("tool_choice requires tools")
+        if self.tools is not None:
+            names = [definition.function.name for definition in self.tools]
+            if len(set(names)) != len(names):
+                raise ValueError("tool names must be unique")
         return self
 
 
@@ -185,12 +241,27 @@ class CapabilitiesResponse(StrictSchema):
 class AssistantMessage(StrictSchema):
     role: Literal["assistant"] = "assistant"
     content: str
+    tool_calls: tuple[ToolCall, ...] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_tool_calls(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Keep a tool-free reply byte-identical to what callers received before.
+
+        ``usage: null`` is part of this contract elsewhere, so a blanket
+        exclude-none would break it. Only this field is dropped, and only when
+        the model requested no calls.
+        """
+
+        data = handler(self)
+        if data.get("tool_calls") is None:
+            data.pop("tool_calls", None)
+        return data
 
 
 class ChatChoice(StrictSchema):
     index: Literal[0] = 0
     message: AssistantMessage
-    finish_reason: Literal["stop", "length"] | None
+    finish_reason: Literal["stop", "length", "tool_calls"] | None
 
 
 class TokenUsage(StrictSchema):
@@ -214,12 +285,27 @@ class ChunkDelta(StrictSchema):
 
     role: Literal["assistant"] | None = None
     content: str | None = None
+    tool_calls: tuple[ToolCall, ...] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_tool_calls(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Drop `tool_calls` when the model requested none.
+
+        The HTTP frame builder already strips every absent delta field; doing it
+        here too keeps a delta dumped directly — as tests and any non-HTTP
+        consumer do — the same shape it was before tool calling existed.
+        """
+
+        data = handler(self)
+        if data.get("tool_calls") is None:
+            data.pop("tool_calls", None)
+        return data
 
 
 class ChatCompletionChunkChoice(StrictSchema):
     index: Literal[0] = 0
     delta: ChunkDelta
-    finish_reason: Literal["stop", "length"] | None = None
+    finish_reason: Literal["stop", "length", "tool_calls"] | None = None
 
 
 class ChatCompletionChunk(StrictSchema):
