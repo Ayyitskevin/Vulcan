@@ -123,6 +123,11 @@ class ChatCompletionRequest(StrictSchema):
     # both is refused rather than silently preferring one.
     max_completion_tokens: int | None = Field(default=None, strict=True, ge=1, le=32768)
     stream: bool = Field(default=False, strict=True)
+    # Thinking control. None means "say nothing", which keeps the wire request
+    # byte-identical to before this field existed; True/False is sent explicitly.
+    # Ollama-scoped: a thinking model otherwise spends an invisible, uncontrollable
+    # share of the caller's token budget on reasoning it never returns.
+    think: bool | None = Field(default=None, strict=True)
     tools: tuple[ToolDefinition, ...] | None = Field(default=None, max_length=64)
     tool_choice: Literal["auto", "none", "required"] | None = None
     response_format: ResponseFormat | None = None
@@ -283,19 +288,27 @@ class AssistantMessage(StrictSchema):
     role: Literal["assistant"] = "assistant"
     content: str
     tool_calls: tuple[ToolCall, ...] | None = None
+    # Present only when the provider returned reasoning text. Omitted otherwise so
+    # a reply from a non-thinking model stays byte-identical to before this existed.
+    thinking: str | None = None
 
     @model_serializer(mode="wrap")
-    def _omit_absent_tool_calls(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Keep a tool-free reply byte-identical to what callers received before.
+    def _omit_absent_optional_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Keep a tool-free, thinking-free reply byte-identical to what callers
+        received before either field existed.
 
         ``usage: null`` is part of this contract elsewhere, so a blanket
-        exclude-none would break it. Only this field is dropped, and only when
-        the model requested no calls.
+        exclude-none would break it. Only these two fields are dropped, and only
+        when the model produced neither tool calls nor reasoning text.
         """
 
         data = handler(self)
         if data.get("tool_calls") is None:
             data.pop("tool_calls", None)
+        if data.get("thinking") is None:
+            data.pop("thinking", None)
         return data
 
 

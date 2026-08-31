@@ -447,6 +447,7 @@ class Gateway:
                         message=AssistantMessage(
                             content=result.content,
                             tool_calls=_response_tool_calls(result.tool_calls),
+                            thinking=result.thinking,
                         ),
                         finish_reason=result.finish_reason,
                     ),
@@ -487,6 +488,7 @@ class Gateway:
             temperature=request.temperature,
             max_tokens=request.output_token_cap,
             keep_alive=model.keep_alive,
+            think=request.think,
             tools=tuple(
                 ProviderTool(
                     name=definition.function.name,

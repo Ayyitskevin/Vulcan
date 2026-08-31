@@ -50,6 +50,8 @@ class ProviderChatRequest:
     temperature: float | None
     max_tokens: int | None
     keep_alive: str | None = None
+    # None means the adapter sends no thinking directive at all.
+    think: bool | None = None
     tools: tuple[ProviderTool, ...] | None = None
     tool_choice: Literal["auto", "none", "required"] | None = None
     # None means unconstrained; a schema of None with json_object means "valid
@@ -67,6 +69,9 @@ class ProviderTokenUsage:
 class ProviderChatResult:
     content: str
     finish_reason: Literal["stop", "length", "tool_calls"] | None
+    # Reasoning text when the provider both produced and returned it. Ollama counts
+    # it in eval_count, so a caller billed for it can now see it.
+    thinking: str | None = None
     usage: ProviderTokenUsage | None = None
     tool_calls: tuple[ProviderToolCall, ...] | None = None
 

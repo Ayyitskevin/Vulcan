@@ -42,6 +42,7 @@ def _chat_request(
     temperature: float | None = None,
     max_tokens: int | None = None,
     keep_alive: str | None = None,
+    think: bool | None = None,
 ) -> ProviderChatRequest:
     return ProviderChatRequest(
         provider_model=provider_model,
@@ -51,6 +52,7 @@ def _chat_request(
         ),
         temperature=temperature,
         max_tokens=max_tokens,
+        think=think,
         keep_alive=keep_alive,
     )
 
@@ -213,6 +215,77 @@ def test_ollama_chat_payload_carries_keep_alive_only_when_set() -> None:
 
     assert json.loads(captured[0].content)["keep_alive"] == "2h"
     assert "keep_alive" not in json.loads(captured[1].content)
+
+
+def test_ollama_chat_payload_carries_think_only_when_the_caller_states_it() -> None:
+    # A thinking model otherwise spends an invisible share of the caller's token
+    # budget on reasoning. `think` must reach the wire when stated -- including
+    # False, which is the whole point -- and be absent (not null) when unstated,
+    # so an unstated request is byte-identical to before the field existed.
+    captured: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "model": "runtime-model",
+                "message": {"role": "assistant", "content": "Hello."},
+                "done": True,
+            },
+        )
+
+    asyncio.run(_invoke_ollama(handler, request=_chat_request(think=False)))
+    asyncio.run(_invoke_ollama(handler, request=_chat_request(think=True)))
+    asyncio.run(_invoke_ollama(handler, request=_chat_request()))
+
+    assert json.loads(captured[0].content)["think"] is False
+    assert json.loads(captured[1].content)["think"] is True
+    assert "think" not in json.loads(captured[2].content)
+
+
+def test_ollama_chat_surfaces_thinking_the_caller_was_billed_for() -> None:
+    # Ollama counts thinking in eval_count. Before this field existed the strict
+    # message model dropped it, so callers paid for output they could not see.
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "runtime-model",
+                "message": {
+                    "role": "assistant",
+                    "content": "OK",
+                    "thinking": "The user asked for one word.",
+                },
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 11,
+                "eval_count": 39,
+            },
+        )
+
+    result = asyncio.run(_invoke_ollama(handler))
+
+    assert result == ProviderChatResult(
+        content="OK",
+        finish_reason="stop",
+        usage=ProviderTokenUsage(prompt_tokens=11, completion_tokens=39),
+        thinking="The user asked for one word.",
+    )
+
+
+def test_ollama_chat_result_thinking_is_none_when_the_model_returns_none() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "runtime-model",
+                "message": {"role": "assistant", "content": "Hello."},
+                "done": True,
+            },
+        )
+
+    assert asyncio.run(_invoke_ollama(handler)).thinking is None
 
 
 @pytest.mark.parametrize(

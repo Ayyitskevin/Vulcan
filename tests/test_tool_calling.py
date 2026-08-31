@@ -109,6 +109,21 @@ def test_a_reply_without_tool_calls_is_byte_identical_to_before() -> None:
     }
 
 
+def test_a_reply_with_thinking_carries_it_and_without_it_omits_the_field() -> None:
+    """Thinking is billed in completion tokens, so a caller must be able to see it.
+
+    The absent case is the regression guard: no consumer should acquire a new
+    ``thinking: null`` key just because a thinking-capable field exists.
+    """
+
+    assert AssistantMessage(content="OK", thinking="brief reasoning").model_dump(mode="json") == {
+        "role": "assistant",
+        "content": "OK",
+        "thinking": "brief reasoning",
+    }
+    assert "thinking" not in AssistantMessage(content="OK").model_dump(mode="json")
+
+
 # --- the Ollama wire ------------------------------------------------------
 
 

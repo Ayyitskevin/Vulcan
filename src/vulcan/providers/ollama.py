@@ -62,6 +62,10 @@ class _OllamaMessage(BaseModel):
 
     role: Literal["assistant"]
     content: str
+    # Ollama returns this for thinking models and counts it in eval_count. Without
+    # the field, extra="ignore" dropped it and the caller was billed for output it
+    # could neither see nor suppress.
+    thinking: str | None = None
     # A list, not a tuple: this model is strict and parses JSON, which has no tuples.
     tool_calls: list[_OllamaToolCall] | None = None
 
@@ -207,6 +211,10 @@ class OllamaProvider:
             options["num_predict"] = request.max_tokens
         if options:
             payload["options"] = options
+        # Thinking directive, only when the caller stated one. Absent means
+        # byte-identical wire behavior to before this field existed.
+        if request.think is not None:
+            payload["think"] = request.think
         # Residency knob, only when the operator configured one: absent means
         # byte-identical wire behavior to before this field existed.
         if request.keep_alive is not None:
@@ -263,6 +271,7 @@ class OllamaProvider:
             finish_reason="tool_calls" if calls else _finish_reason(parsed.done_reason),
             usage=_usage(parsed.prompt_eval_count, parsed.eval_count),
             tool_calls=calls,
+            thinking=parsed.message.thinking,
         )
 
     async def chat_stream(self, request: ProviderChatRequest) -> AsyncIterator[ProviderStreamEvent]:
